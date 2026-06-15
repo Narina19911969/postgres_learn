@@ -9,7 +9,7 @@ from console import console, render_error
 from db import get_conn
 from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator
 from commands import command, CATEGORY_PRODUCTS
-
+from decimal import Decimal
 
 class SkuValidator(NonEmptyValidator):
     def validate(self, document):
@@ -23,12 +23,12 @@ class PriceValidator(NonEmptyValidator):
     def validate(self, document):
         super().validate(document)
         try:
-            price = float(document.text)
-            if price < 0:
+            price = Decimal(document.text)
+            if price <= 0:
                 raise ValueError
         except ValueError:
             from prompt_toolkit.validation import ValidationError
-            raise ValidationError(message="Цена должна быть числом больше или равным 0.")
+            raise ValidationError(message="Цена должна быть числом больше 0.")
 
 
 @dataclass
@@ -36,7 +36,7 @@ class Product:
     id: int
     sku: str
     name: str
-    price: float
+    price: Decimal
     category_id: int
 
 
@@ -126,7 +126,7 @@ def add_product() -> None:
 
     conn.execute(
         "INSERT INTO catalog.products (sku, name, price, category_id) VALUES (%s, %s, %s, %s)",
-        (sku, name, float(price_str), category_id),
+        (sku, name, Decimal(price_str), category_id),
     )
     console.print(f"[green]Товар '{name}' ({sku}) успешно добавлен в категорию '{selected_category_name}'.[/green]")
 
@@ -168,7 +168,7 @@ def edit_product(_id: str) -> None:
 
     conn.execute(
         "UPDATE catalog.products SET sku = %s, name = %s, price = %s, category_id = %s WHERE id = %s",
-        (sku, name, float(price_str), category_id, _id),
+        (sku, name, Decimal(price_str), category_id, _id),
     )
     console.print(f"[green]Товар #{_id} успешно обновлен.[/green]")
 
