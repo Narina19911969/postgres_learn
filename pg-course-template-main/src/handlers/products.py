@@ -11,7 +11,7 @@ from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator
 from commands import command, CATEGORY_PRODUCTS
 from decimal import Decimal
 
-from auth import ROLE_CATALOG_MANAGER
+from auth import ROLE_CATALOG_MANAGER, ROLE_SALES_MANAGER
 
 class SkuValidator(NonEmptyValidator):
     def validate(self, document):
@@ -63,7 +63,7 @@ def _render_product(product: Product) -> None:
     console.print(panel)
 
 
-@command("list products", "список всех товаров", CATEGORY_PRODUCTS, [ROLE_CATALOG_MANAGER],)
+@command("list products", "список всех товаров", CATEGORY_PRODUCTS, [ROLE_CATALOG_MANAGER, ROLE_SALES_MANAGER],)
 def list_products() -> None:
     conn = get_conn()
     table = Table(title="Каталог товаров", show_header=True, header_style="bold cyan")
@@ -87,7 +87,7 @@ def list_products() -> None:
     console.print(table)
 
 
-@command("show product", "информация о товаре", CATEGORY_PRODUCTS, [ROLE_CATALOG_MANAGER])
+@command("show product", "информация о товаре", CATEGORY_PRODUCTS, [ROLE_CATALOG_MANAGER, ROLE_SALES_MANAGER])
 def show_product(_id: str) -> None:
     conn = get_conn()
     with conn.cursor(row_factory=class_row(Product)) as cur:
