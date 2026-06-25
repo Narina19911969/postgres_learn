@@ -11,7 +11,7 @@ from console import console, render_error
 from db import get_conn
 from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator
 from commands import command
-from auth import ROLE_SALES_MANAGER, _USER
+from auth import ROLE_SALES_MANAGER, auth_user
 
 CATEGORY_ORDERS = "Управление заказами"
 
@@ -157,7 +157,7 @@ def add_order() -> None:
             VALUES (%s, 'unpublished', 0.00, %s) 
             RETURNING id
             """,
-            (warehouse_id, _USER)
+            (warehouse_id, auth_user().id)
         )
         row = cur.fetchone()
         order_id = row[0]
