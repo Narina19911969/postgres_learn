@@ -12,29 +12,18 @@ from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator
 from commands import command, CATEGORY_WAREHOUSES
 from auth import ROLE_CATALOG_MANAGER, ROLE_SALES_MANAGER
 
+from prompt_toolkit.shortcuts import choice
 
-cities = [
-    "Москва",
-    "Санкт-Петербург",
-    "Новосибирск",
-    "Екатеринбург",
-    "Казань",
-    "Нижний Новгород",
-    "Челябинск",
-    "Самара",
-    "Омск",
-    "Ростов-на-Дону",
-    "Уфа",
-    "Красноярск",
-    "Воронеж",
-    "Пермь",
-    "Волгоград",
-]
 
-city_completer = WordCompleter(cities, ignore_case=True, sentence=True)
-city_validator = ChoiceValidator(
-    cities, message="Город должен быть из списка. Используйте Tab для автодополнения."
-)
+def _get_cities_from_db() -> list:
+    """Запрашиваем текстовые имена городов из таблицы catalog.cities"""
+    conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute("SELECT name FROM catalog.cities ORDER BY name")
+        # Для choice передаем кортеж: (значение, отображаемый_текст)
+        # Так как нам нужен текст, имя города выступает и ключом, и значением
+        return [(row[0], row[0]) for row in cur.fetchall()]
+
 
 
 @dataclass
@@ -116,7 +105,11 @@ def show_warehouse(_id: str) -> None:
 @command("add warehouse", "добавить склад (интерактивно)", CATEGORY_WAREHOUSES, [ROLE_CATALOG_MANAGER],)
 def add_warehouse() -> None:
     conn = get_conn()
-    city = prompt("Город: ", validator=city_validator, completer=city_completer).strip()
+    city_options = _get_cities_from_db()
+
+    city = choice(message="Выберите город расположения склада:", options=city_options)
+    if city is None: return
+
     address = prompt("Адрес: ", validator=NonEmptyValidator()).strip()
     label = prompt("Метка (необязательно): ").strip() or None
 
@@ -156,12 +149,10 @@ def edit_warehouse(_id: str) -> None:
         render_error(f"Склад с ID {_id} не найден")
         return
 
-    city = prompt(
-        "Город: ",
-        default=warehouse.city,
-        validator=city_validator,
-        completer=city_completer,
-    ).strip()
+    city_options = _get_cities_from_db()
+    # Подставляем текущий текстовый город по умолчанию
+    city = choice(message="Город склада:", options=city_options, default=warehouse.city)
+    if city is None: return
     address = prompt(
         "Адрес: ", default=warehouse.address, validator=NonEmptyValidator()
     ).strip()
