@@ -6,6 +6,10 @@ from console import console, render_error
 from db import connect, DB_USER, close
 from setup import setup_logger
 
+import argparse
+
+from auth import login
+
 # pylint: disable-next=unused-import
 import handlers
 from commands import get_completer, find_command, get_args
@@ -16,7 +20,16 @@ setup_logger(psycopg_log_level=logging.INFO)
 
 def main() -> None:
     # Подключение к БД
+    parser = argparse.ArgumentParser(description="Inventory Management System")
+    parser.add_argument("-u", "--username", help="Username for authentication")
+    parser.add_argument("-p", "--password", help="Password for authentication")
+    cli_args = parser.parse_args()
+
+
     connect()
+
+    login(username=cli_args.username, password=cli_args.password)
+
     logging.info("App Started")
 
     # Вывод заголовка через rich

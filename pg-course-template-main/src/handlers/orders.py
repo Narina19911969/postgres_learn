@@ -11,6 +11,7 @@ from console import console, render_error
 from db import get_conn
 from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator
 from commands import command
+from auth import ROLE_SALES_MANAGER, auth_user
 
 CATEGORY_ORDERS = "Управление заказами"
 
@@ -124,7 +125,7 @@ def interactive_add_items(order_id: int) -> None:
             break
 
 
-@command("add order", "создать новый заказ (интерактивно)", CATEGORY_ORDERS)
+@command("add order", "создать новый заказ (интерактивно)", CATEGORY_ORDERS, [ROLE_SALES_MANAGER])
 def add_order() -> None:
     conn = get_conn()
 
@@ -151,8 +152,12 @@ def add_order() -> None:
 
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO sales.orders (warehouse_id, status, total_amount) VALUES (%s, 'unpublished', 0.00) RETURNING id",
-            (warehouse_id,)
+            """
+            INSERT INTO sales.orders (warehouse_id, status, total_amount, created_by) 
+            VALUES (%s, 'unpublished', 0.00, %s) 
+            RETURNING id
+            """,
+            (warehouse_id, auth_user().id)
         )
         row = cur.fetchone()
         order_id = row[0]
@@ -160,7 +165,7 @@ def add_order() -> None:
     console.print(f"[green]Заказ #{order_id} успешно инициализирован в статусе 'unpublished'.[/green]")
     interactive_add_items(order_id)
 
-@command("edit order", "редактировать склад отгрузки заказа", CATEGORY_ORDERS)
+@command("edit order", "редактировать склад отгрузки заказа", CATEGORY_ORDERS, [ROLE_SALES_MANAGER])
 def edit_order(_id: str) -> None:
     conn = get_conn()
     with conn.cursor(row_factory=class_row(Order)) as cur:
@@ -194,7 +199,7 @@ def edit_order(_id: str) -> None:
     conn.execute("UPDATE sales.orders SET warehouse_id = %s WHERE id = %s", (warehouse_id, _id))
     console.print(f"[green]Заказ #{_id} успешно обновлен.[/green]")
 
-@command("delete order", "удалить заказ", CATEGORY_ORDERS)
+@command("delete order", "удалить заказ", CATEGORY_ORDERS, [ROLE_SALES_MANAGER])
 def delete_order(_id: str) -> None:
     conn = get_conn()
     with conn.cursor(row_factory=class_row(Order)) as cur:
@@ -213,7 +218,7 @@ def delete_order(_id: str) -> None:
         console.print(f"[green]Заказ #{_id} успешно удален.[/green]")
 
 
-@command("add order_item", "добавить позицию в существующий заказ", CATEGORY_ORDERS)
+@command("add order_item", "добавить позицию в существующий заказ", CATEGORY_ORDERS, [ROLE_SALES_MANAGER])
 def add_order_item(order_id: str) -> None:
     conn = get_conn()
     with conn.cursor() as cur:
@@ -223,7 +228,7 @@ def add_order_item(order_id: str) -> None:
             return
 
     interactive_add_items(int(order_id))
-@command("edit order_item", "изменить количество товара в позиции заказа", CATEGORY_ORDERS)
+@command("edit order_item", "изменить количество товара в позиции заказа", CATEGORY_ORDERS, [ROLE_SALES_MANAGER])
 def edit_order_item(order_id: str) -> None:
     conn = get_conn()
 
@@ -272,7 +277,7 @@ def edit_order_item(order_id: str) -> None:
     recalculate_order_total(int(order_id))
 
 
-@command("delete order_item", "удалить товарную позицию из заказа", CATEGORY_ORDERS)
+@command("delete order_item", "удалить товарную позицию из заказа", CATEGORY_ORDERS, [ROLE_SALES_MANAGER])
 def delete_order_item(order_id: str) -> None:
     conn = get_conn()
 
@@ -312,7 +317,7 @@ def delete_order_item(order_id: str) -> None:
         console.print(f"[green]Товар успешно удален из спецификации заказа.[/green]")
         recalculate_order_total(int(order_id))
 
-@command("list orders", "список всех заказов", CATEGORY_ORDERS)
+@command("list orders", "список всех заказов", CATEGORY_ORDERS, [ROLE_SALES_MANAGER])
 def list_orders() -> None:
     conn = get_conn()
     table = Table(title="Список заказов", show_header=True, header_style="bold cyan")
@@ -336,7 +341,7 @@ def list_orders() -> None:
     console.print(table)
 
 
-@command("show order", "информация о заказе и его составе", CATEGORY_ORDERS)
+@command("show order", "информация о заказе и его составе", CATEGORY_ORDERS, [ROLE_SALES_MANAGER])
 def show_order(_id: str) -> None:
     conn = get_conn()
     with conn.cursor(row_factory=class_row(Order)) as cur:

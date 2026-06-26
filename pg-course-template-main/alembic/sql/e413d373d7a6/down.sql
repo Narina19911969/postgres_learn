@@ -1,0 +1,14 @@
+-- 1. Отменяем авто-права на будущее в схеме auth
+ALTER DEFAULT PRIVILEGES IN SCHEMA auth REVOKE SELECT ON TABLES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA auth REVOKE SELECT ON TABLES FROM sales_manager;
+ALTER DEFAULT PRIVILEGES IN SCHEMA auth REVOKE SELECT ON TABLES FROM catalog_manager;
+
+-- 2. Отзываем текущие права на чтение таблиц и использование схемы
+REVOKE SELECT ON ALL TABLES IN SCHEMA auth FROM PUBLIC;
+REVOKE SELECT ON ALL TABLES IN SCHEMA auth FROM sales_manager;
+REVOKE SELECT ON ALL TABLES IN SCHEMA auth FROM catalog_manager;
+
+REVOKE USAGE ON SCHEMA auth FROM PUBLIC;
+REVOKE USAGE ON SCHEMA auth FROM sales_manager;
+REVOKE USAGE ON SCHEMA auth FROM catalog_manager;
+
