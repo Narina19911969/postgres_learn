@@ -1,5 +1,5 @@
 
-CREATE TABLE catalog.cities (
+CREATE TABLE  catalog.cities (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL UNIQUE
 );
@@ -7,7 +7,7 @@ CREATE TABLE catalog.cities (
 
 CREATE SCHEMA IF NOT EXISTS inventory;
 
-CREATE TABLE catalog.routes (
+CREATE TABLE inventory.routes (
     from_city_id INT NOT NULL REFERENCES catalog.cities(id) ON DELETE RESTRICT,
     to_city_id INT NOT NULL REFERENCES catalog.cities(id) ON DELETE RESTRICT,
     duration INTERVAL NOT NULL,
@@ -20,14 +20,20 @@ CREATE TABLE inventory.stock (
     warehouse_id INT NOT NULL REFERENCES catalog.warehouses(id) ON DELETE RESTRICT,
     product_id INT NOT NULL REFERENCES catalog.products(id) ON DELETE RESTRICT,
     quantity INT NOT NULL DEFAULT 0 CHECK (quantity >= 0),
-    reserved INT NOT NULL DEFAULT 0 CHECK (reserved >= 0),
     PRIMARY KEY (warehouse_id, product_id)
+);
+
+CREATE TABLE inventory.order_reserves (
+    order_id INT NOT NULL REFERENCES sales.orders(id) ON DELETE CASCADE,
+    product_id INT NOT NULL REFERENCES catalog.products(id) ON DELETE RESTRICT,
+    warehouse_id INT NOT NULL REFERENCES catalog.warehouses(id) ON DELETE RESTRICT,
+    quantity INT NOT NULL CHECK (quantity >= 0),
+    PRIMARY KEY (order_id, product_id)
 );
 
 
 CREATE TABLE inventory.deliveries (
-    id SERIAL PRIMARY KEY,
-    order_id INT NOT NULL REFERENCES sales.orders(id) ON DELETE CASCADE,
+    order_id INT PRIMARY KEY REFERENCES sales.orders(id) ON DELETE CASCADE,
     status VARCHAR(20) NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'shipping', 'shipped')),
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     shipped_at TIMESTAMP
@@ -35,11 +41,11 @@ CREATE TABLE inventory.deliveries (
 
 
 CREATE TABLE inventory.delivery_items (
-    delivery_id INT NOT NULL REFERENCES inventory.deliveries(id) ON DELETE CASCADE,
+    order_id INT NOT NULL REFERENCES inventory.deliveries(order_id) ON DELETE CASCADE,
     product_id INT NOT NULL REFERENCES catalog.products(id) ON DELETE RESTRICT,
     quantity INT NOT NULL CHECK (quantity > 0),
     status VARCHAR(20) NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'shipped')),
-    PRIMARY KEY (delivery_id, product_id)
+    PRIMARY KEY (order_id, product_id)
 );
 
 
@@ -56,15 +62,16 @@ CREATE TABLE inventory.transfers (
 
 
 CREATE TABLE inventory.transfer_items (
+    id SERIAL PRIMARY KEY, 
     transfer_id INT NOT NULL REFERENCES inventory.transfers(id) ON DELETE CASCADE,
     product_id INT NOT NULL REFERENCES catalog.products(id) ON DELETE RESTRICT,
     quantity INT NOT NULL CHECK (quantity > 0),
     status VARCHAR(20) NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'shipped', 'received')),
-    PRIMARY KEY (transfer_id, product_id)
+    
+    created_by INT NOT NULL REFERENCES auth.users(id) ON DELETE RESTRICT, 
+    order_id INT REFERENCES sales.orders(id) ON DELETE SET NULL
 );
 
-
-GRANT ALL PRIVILEGES ON catalog.routes TO inventory_manager;
 
 GRANT USAGE, CREATE ON SCHEMA inventory TO inventory_manager;
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA inventory TO inventory_manager;
@@ -75,21 +82,16 @@ GRANT USAGE ON SCHEMA sales TO inventory_manager;
 GRANT SELECT ON ALL TABLES IN SCHEMA sales TO inventory_manager;
 GRANT UPDATE (status) ON sales.orders TO inventory_manager;
 
-GRANT USAGE ON SCHEMA catalog TO inventory_manager;
-GRANT SELECT ON ALL TABLES IN SCHEMA catalog TO inventory_manager;
-
-
-GRANT SELECT ON catalog.routes TO worker;
 
 GRANT USAGE ON SCHEMA inventory TO worker;
+GRANT SELECT, UPDATE ON inventory.routes TO worker;
 GRANT SELECT, UPDATE ON inventory.stock TO worker;
+GRANT SELECT, UPDATE ON inventory.order_reserves TO worker;
 GRANT SELECT, UPDATE ON inventory.deliveries TO worker;
 GRANT SELECT, UPDATE ON inventory.delivery_items TO worker;
 GRANT SELECT, UPDATE ON inventory.transfers TO worker;
 GRANT SELECT, UPDATE ON inventory.transfer_items TO worker;
 
-GRANT USAGE ON SCHEMA catalog TO worker;
-GRANT SELECT ON catalog.cities, catalog.warehouses, catalog.products, catalog.product_categories TO worker;
 
 GRANT USAGE ON SCHEMA auth TO inventory_manager, worker;
 GRANT SELECT ON auth.users TO inventory_manager, worker;

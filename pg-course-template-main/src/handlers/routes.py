@@ -7,7 +7,7 @@ from db import get_conn
 from validators import NonEmptyValidator, YesNoValidator
 from commands import command
 
-CATEGORY_ROUTES = "Управление маршрутами"
+INVENTORY_ROUTES = "Управление маршрутами"
 ROLE_INVENTORY_MANAGER = "inventory_manager"
 
 class RouteValidator(NonEmptyValidator):
@@ -43,12 +43,12 @@ def _db_fetch_cities(mode: str, parent_id: int = None) -> list:
     with conn.cursor() as cur:
         if mode == "from":
             cur.execute("""
-                SELECT DISTINCT c.id, c.name FROM catalog.routes r 
+                SELECT DISTINCT c.id, c.name FROM inventory.routes r 
                 JOIN catalog.cities c ON r.from_city_id = c.id ORDER BY c.name
             """)
         elif mode == "to_filtered":
             cur.execute("""
-                SELECT DISTINCT c.id, c.name FROM catalog.routes r 
+                SELECT DISTINCT c.id, c.name FROM inventory.routes r 
                 JOIN catalog.cities c ON r.to_city_id = c.id 
                 WHERE r.from_city_id = %s ORDER BY c.name
             """, (parent_id,))
@@ -57,7 +57,7 @@ def _db_fetch_cities(mode: str, parent_id: int = None) -> list:
         return cur.fetchall()
 
 
-@command("list routes", "список всех логистических маршрутов", CATEGORY_ROUTES, [ROLE_INVENTORY_MANAGER])
+@command("list routes", "список всех логистических маршрутов", INVENTORY_ROUTES, [ROLE_INVENTORY_MANAGER])
 def list_routes() -> None:
     conn = get_conn()
     table = Table(title="Логистические маршруты между городами", show_header=True, header_style="bold cyan")
@@ -67,9 +67,10 @@ def list_routes() -> None:
     table.add_column("Минимальная сумма (порог)", style="green", justify="right", width=25)
 
     with conn.cursor() as cur:
+
         cur.execute("""
             SELECT c1.name, c2.name, r.duration, r.total_threshold 
-            FROM catalog.routes r
+            FROM inventory.routes r
             JOIN catalog.cities c1 ON r.from_city_id = c1.id
             JOIN catalog.cities c2 ON r.to_city_id = c2.id
             ORDER BY c1.name, c2.name
@@ -85,76 +86,65 @@ def list_routes() -> None:
     console.print(table)
 
 
-@command("add route", "создать новый маршрут перемещения", CATEGORY_ROUTES, [ROLE_INVENTORY_MANAGER])
+@command("add route", "создать новый маршрут перемещения", INVENTORY_ROUTES, [ROLE_INVENTORY_MANAGER])
 def add_route() -> None:
     conn = get_conn()
 
-    # --- ЗВЕЗДОЧКА 1: Выбор города А (from) одним SQL-запросом ---
-    # Показываем только те города, из которых проложены маршруты НЕ во все остальные города
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT c.id, c.name 
-            FROM catalog.cities c
-            WHERE EXISTS (
-                -- Ищем хотя бы один город Б, пары с которым еще нет в таблице routes
-                SELECT 1 FROM catalog.cities c2
-                WHERE c2.id != c.id 
-                  AND NOT EXISTS (
-                      SELECT 1 FROM catalog.routes r 
-                      WHERE r.from_city_id = c.id AND r.to_city_id = c2.id
-                  )
-            )
-            ORDER BY c.name
+            SELECT 
+                c1.id AS from_id, c1.name AS from_name,
+                c2.id AS to_id, c2.name AS to_name
+            FROM catalog.cities c1
+            CROSS JOIN catalog.cities c2
+            WHERE c1.id != c2.id
+              AND NOT EXISTS (
+                  SELECT 1 FROM inventory.routes r 
+                  WHERE r.from_city_id = c1.id AND r.to_city_id = c2.id
+              )
+            ORDER BY c1.name, c2.name
         """)
-        allowed_sources = cur.fetchall()
+        available_pairs = cur.fetchall()
 
-    if not allowed_sources:
+    if not available_pairs:
         render_error("Все возможные логистические маршруты между городами уже полностью сконфигурированы!")
         return
 
-    from_options = [(c_id, name) for c_id, name in allowed_sources]
-    from_id = choice(message="Выберите город склада отправки (Пункт А):", options=from_options)
+    from_cities_dict = {}
+    for row in available_pairs:
+        from_cities_dict[row[0]] = row[1]
+
+    from_options = list(from_cities_dict.items())
+
+    from_id = choice(
+        message="Выберите город склада отправки (Пункт А):",
+        options=from_options
+    )
     if from_id is None: return
 
+    to_options = []
+    for row in available_pairs:
+        if row[0] == from_id:
+            to_options.append((row[2], row[3]))
 
-    # --- ЗВЕЗДОЧКА 2: Выбор города Б (to) одним SQL-запросом ---
-    # Выбираем только те города, пары с которыми для выбранного from_id еще нет в базе
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT c.id, c.name 
-            FROM catalog.cities c
-            WHERE c.id != %s 
-              AND NOT EXISTS (
-                  SELECT 1 FROM catalog.routes r 
-                  WHERE r.from_city_id = %s AND r.to_city_id = c.id
-              )
-            ORDER BY c.name
-        """, (from_id, from_id))
-        allowed_destinations = cur.fetchall()
-
-    # Из-за первой проверки этот блок никогда не сработает, но оставим для надежности
-    if not allowed_destinations:
-        render_error("Для выбранного города отправки уже настроены все возможные маршруты назначения.")
-        return
-
-    to_options = [(c_id, name) for c_id, name in allowed_destinations]
-    to_id = choice(message="Выберите город склада приемки (Пункт Б):", options=to_options)
+    to_id = choice(
+        message="Выберите город склада приемки (Пункт Б):",
+        options=to_options
+    )
     if to_id is None: return
 
-
-    # --- Ввод параметров и сохранение ---
-    duration_str = prompt("Укажите время доставки (формат ММ:СС, например 05:30): ", validator=IntervalValidator()).strip()
+    duration_str = prompt("Укажите время доставки (формат ММ:СС, например 05:30): ",
+                          validator=IntervalValidator()).strip()
     threshold_str = prompt("Укажите минимальную сумму (total_threshold): ", validator=RouteValidator()).strip()
 
     conn.execute(
-        "INSERT INTO catalog.routes (from_city_id, to_city_id, duration, total_threshold) VALUES (%s, %s, %s::interval, %s)",
+        "INSERT INTO inventory.routes (from_city_id, to_city_id, duration, total_threshold) VALUES (%s, %s, %s::interval, %s)",
         (from_id, to_id, f"00:{duration_str}", float(threshold_str))
     )
     console.print("[green]Логистический маршрут успешно зафиксирован в системе.[/green]")
 
 
-
-@command("show route", "просмотр параметров конкретного маршрута", CATEGORY_ROUTES, [ROLE_INVENTORY_MANAGER])
+@command("show route", "просмотр параметров конкретного маршрута", INVENTORY_ROUTES, [ROLE_INVENTORY_MANAGER])
 def show_route() -> None:
     conn = get_conn()
     from_cities = _db_fetch_cities("from")
@@ -172,7 +162,7 @@ def show_route() -> None:
     with conn.cursor() as cur:
         cur.execute("""
             SELECT c1.name, c2.name, r.duration, r.total_threshold 
-            FROM catalog.routes r
+            FROM inventory.routes r
             JOIN catalog.cities c1 ON r.from_city_id = c1.id
             JOIN catalog.cities c2 ON r.to_city_id = c2.id
             WHERE r.from_city_id = %s AND r.to_city_id = %s
@@ -193,7 +183,7 @@ def show_route() -> None:
     console.print(table)
 
 
-@command("edit route", "изменить параметры существующего маршрута", CATEGORY_ROUTES, [ROLE_INVENTORY_MANAGER])
+@command("edit route", "изменить параметры существующего маршрута", INVENTORY_ROUTES, [ROLE_INVENTORY_MANAGER])
 def edit_route() -> None:
     conn = get_conn()
     from_cities = _db_fetch_cities("from")
@@ -207,7 +197,7 @@ def edit_route() -> None:
     if to_id is None: return
 
     with conn.cursor() as cur:
-        cur.execute("SELECT duration, total_threshold FROM catalog.routes WHERE from_city_id = %s AND to_city_id = %s", (from_id, to_id))
+        cur.execute("SELECT duration, total_threshold FROM inventory.routes WHERE from_city_id = %s AND to_city_id = %s", (from_id, to_id))
         row = cur.fetchone()
 
     total_seconds = int(row[0].total_seconds())
@@ -217,13 +207,13 @@ def edit_route() -> None:
     new_thresh = prompt("Минимальная сумма (порог): ", default=str(row[1]), validator=RouteValidator()).strip()
 
     conn.execute(
-        "UPDATE catalog.routes SET duration = %s::interval, total_threshold = %s WHERE from_city_id = %s AND to_city_id = %s",
+        "UPDATE inventory.routes SET duration = %s::interval, total_threshold = %s WHERE from_city_id = %s AND to_city_id = %s",
         (f"00:{new_dur}", float(new_thresh), from_id, to_id)
     )
     console.print("[green]Параметры маршрута перемещения успешно изменены.[/green]")
 
 
-@command("delete route", "удалить логистический маршрут", CATEGORY_ROUTES, [ROLE_INVENTORY_MANAGER])
+@command("delete route", "удалить логистический маршрут", INVENTORY_ROUTES, [ROLE_INVENTORY_MANAGER])
 def delete_route() -> None:
     conn = get_conn()
     from_cities = _db_fetch_cities("from")
@@ -238,6 +228,6 @@ def delete_route() -> None:
 
     ans = prompt("Вы уверены, что хотите удалить данный маршрут? (y/n, д/н): ", validator=YesNoValidator())
     if YesNoValidator.is_yes(ans):
-        conn.execute("DELETE FROM catalog.routes WHERE from_city_id = %s AND to_city_id = %s", (from_id, to_id))
+        conn.execute("DELETE FROM inventory.routes WHERE from_city_id = %s AND to_city_id = %s", (from_id, to_id))
         console.print("[green]Маршрут успешно удален из системы.[/green]")
 
