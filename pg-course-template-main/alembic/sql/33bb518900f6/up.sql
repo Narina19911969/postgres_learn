@@ -24,11 +24,11 @@ CREATE TABLE inventory.stock (
 );
 
 CREATE TABLE inventory.order_reserves (
+    id SERIAL PRIMARY KEY,
     order_id INT NOT NULL REFERENCES sales.orders(id) ON DELETE CASCADE,
     product_id INT NOT NULL REFERENCES catalog.products(id) ON DELETE RESTRICT,
     warehouse_id INT NOT NULL REFERENCES catalog.warehouses(id) ON DELETE RESTRICT,
     quantity INT NOT NULL CHECK (quantity >= 0),
-    PRIMARY KEY (order_id, product_id)
 );
 
 
@@ -69,7 +69,8 @@ CREATE TABLE inventory.transfer_items (
     status VARCHAR(20) NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'shipped', 'received')),
     
     created_by INT NOT NULL REFERENCES auth.users(id) ON DELETE RESTRICT, 
-    order_id INT REFERENCES sales.orders(id) ON DELETE SET NULL
+    order_id INT REFERENCES sales.orders(id) ON DELETE SET NULL,
+    reserve_id INT REFERENCES inventory.order_reserves(id) ON DELETE SET NULL
 );
 
 
