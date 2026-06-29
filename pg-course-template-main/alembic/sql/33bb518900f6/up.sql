@@ -7,7 +7,7 @@ CREATE TABLE  catalog.cities (
 
 CREATE SCHEMA IF NOT EXISTS inventory;
 
-CREATE TABLE inventory.routes (
+CREATE TABLE  inventory.routes (
     from_city_id INT NOT NULL REFERENCES catalog.cities(id) ON DELETE RESTRICT,
     to_city_id INT NOT NULL REFERENCES catalog.cities(id) ON DELETE RESTRICT,
     duration INTERVAL NOT NULL,
@@ -16,7 +16,7 @@ CREATE TABLE inventory.routes (
 );
 
 
-CREATE TABLE inventory.stock (
+CREATE TABLE  inventory.stock (
     warehouse_id INT NOT NULL REFERENCES catalog.warehouses(id) ON DELETE RESTRICT,
     product_id INT NOT NULL REFERENCES catalog.products(id) ON DELETE RESTRICT,
     quantity INT NOT NULL DEFAULT 0 CHECK (quantity >= 0),
@@ -28,7 +28,7 @@ CREATE TABLE inventory.order_reserves (
     order_id INT NOT NULL REFERENCES sales.orders(id) ON DELETE CASCADE,
     product_id INT NOT NULL REFERENCES catalog.products(id) ON DELETE RESTRICT,
     warehouse_id INT NOT NULL REFERENCES catalog.warehouses(id) ON DELETE RESTRICT,
-    quantity INT NOT NULL CHECK (quantity >= 0),
+    quantity INT NOT NULL CHECK (quantity >= 0)
 );
 
 
