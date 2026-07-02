@@ -61,8 +61,8 @@ def _calculate_item_status(order_id: int, product_id: int, order_status: str, re
         res_row = cur.fetchone()
         res_qty = res_row[0] if res_row else 0
 
-        if res_qty >= req_qty:
-            return f"[green]в резерве[/green] ({res_qty}/{req_qty} шт.)"
+        if res_qty > 0:
+            return "[green]в резерве[/green]"
 
         cur.execute("""
             SELECT ti.status, t.id, c.name, t.arriving_at
@@ -82,8 +82,7 @@ def _calculate_item_status(order_id: int, product_id: int, order_status: str, re
                 time_str = f", прибытие: {arriving_at.strftime('%H:%M:%S')}" if arriving_at else ""
                 return f"[magenta]в пути[/magenta] (Трансфер #{t_id} из г. {src_city}{time_str})"
 
-    return f"[red]дефицит[/red] (в резерве только {res_qty}/{req_qty} шт.)"
-
+    return "[red]дефицит[/red] (требуется перемещение)"
 
 @command("list orders new", "вывод списка новых свободных заказов", CATEGORY_INVENTORY_READ, [ROLE_INVENTORY_MANAGER])
 def list_orders_new() -> None:
@@ -257,78 +256,189 @@ def show_order(order_id: str) -> None:
     console.print(items_table)
 
 
-@command("view warehouse stock", "вывод остатков по конкретному складу", CATEGORY_INVENTORY_READ, [ROLE_INVENTORY_MANAGER])
+@command("view warehouse stock", "вывод остатков по конкретному складу", CATEGORY_INVENTORY_READ,
+         [ROLE_INVENTORY_MANAGER])
 def view_warehouse_stock() -> None:
     conn = get_conn()
     wh_options = _get_warehouses_options()
-    
+
     if not wh_options:
         render_error("В системе нет созданных складов.")
         return
-        
+
     wh_id = choice("Выберите склад для просмотра остатков:", options=wh_options)
     if wh_id is None: return
 
     wh_name = next(name for i, name in wh_options if i == wh_id)
-    table = Table(title=f"Остатки на складе: {wh_name}", show_header=True, header_style="bold cyan")
+    table = Table(title=f"Баланс товаров на складе: {wh_name}", show_header=True, header_style="bold cyan")
     table.add_column("SKU / Товар", min_width=30)
-    table.add_column("Свободный остаток (quantity)", justify="right", style="green")
+    table.add_column("Доступно", justify="right", style="green")
+    table.add_column("В резерве", justify="right", style="yellow")
+    table.add_column("Всего", justify="right", style="bold white")
 
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT p.sku || ' - ' || p.name, s.quantity 
-            FROM inventory.stock s
-            JOIN catalog.products p ON s.product_id = p.id
-            WHERE s.warehouse_id = %s AND s.quantity > 0
-            ORDER BY p.name
-        """, (wh_id,))
+            SELECT 
+                main_view.product_info,
+                main_view.available_qty,
+
+                (
+                    SELECT r_sum 
+                    FROM (
+                        SELECT SUM(quantity) AS r_sum FROM inventory.order_reserves 
+                        WHERE product_id = main_view.p_id AND warehouse_id = %s
+                        UNION ALL
+                        SELECT 0
+                    ) res_sub 
+                    WHERE r_sum IS NOT NULL 
+                    LIMIT 1
+                ) AS reserved_qty,
+
+                main_view.available_qty + (
+                    SELECT r_sum 
+                    FROM (
+                        SELECT SUM(quantity) AS r_sum FROM inventory.order_reserves 
+                        WHERE product_id = main_view.p_id AND warehouse_id = %s
+                        UNION ALL
+                        SELECT 0
+                    ) res_sub 
+                    WHERE r_sum IS NOT NULL 
+                    LIMIT 1
+                ) AS total_qty
+
+            FROM (
+                SELECT 
+                    p.id AS p_id,
+                    p.sku || ' - ' || p.name AS product_info,
+                    (
+                        SELECT qty 
+                        FROM (
+                            SELECT quantity AS qty FROM inventory.stock 
+                            WHERE product_id = p.id AND warehouse_id = %s
+                            UNION ALL
+                            SELECT 0
+                        ) stock_sub 
+                        LIMIT 1
+                    ) AS available_qty
+                FROM catalog.products p
+            ) main_view
+            ORDER BY main_view.product_info;
+        """, (wh_id, wh_id, wh_id))
         stocks = cur.fetchall()
 
-    if not stocks:
-        console.print("[yellow]На данном складе сейчас нет свободных товаров.[/yellow]")
-        return
+    for prod, available, reserved, total in stocks:
+        if total == 0:
+            table.add_row(f"[dim]{prod}[/dim]", "[dim]0[/dim]", "[dim]0[/dim]", "[dim]0[/dim]")
+        else:
+            table.add_row(prod, str(available), str(reserved), str(total))
 
-    for prod, qty in stocks:
-        table.add_row(prod, str(qty))
     console.print(table)
 
 
-@command("view product stock", "вывод остатков конкретного продукта на всех складах", CATEGORY_INVENTORY_READ, [ROLE_INVENTORY_MANAGER])
+@command("view product stock", "вывод остатков конкретного продукта на всех складах", CATEGORY_INVENTORY_READ,
+         [ROLE_INVENTORY_MANAGER])
 def view_product_stock() -> None:
     conn = get_conn()
     prod_options = _get_products_options()
-    
+
     if not prod_options:
         render_error("В каталоге нет товаров.")
         return
-        
+
     p_id = choice("Выберите продукт для анализа остатков:", options=prod_options)
     if p_id is None: return
 
     prod_name = next(name for i, name in prod_options if i == p_id)
     table = Table(title=f"Распределение остатков товара: {prod_name}", show_header=True, header_style="bold yellow")
     table.add_column("Склад хранения (Город / Адрес)", min_width=35)
-    table.add_column("Доступно штук", justify="right", style="green")
+    table.add_column("Доступно", justify="right", style="green")
+    table.add_column("В резерве", justify="right", style="yellow")
+    table.add_column("Всего", justify="right", style="bold white")
 
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT c.name || ', ' || w.address || COALESCE(' (' || w.label || ')', ''), s.quantity
-            FROM inventory.stock s
-            JOIN catalog.warehouses w ON s.warehouse_id = w.id
-            JOIN catalog.cities c ON w.city = c.name
-            WHERE s.product_id = %s AND s.quantity > 0
-            ORDER BY c.name
-        """, (p_id,))
+            SELECT 
+                wh_view.warehouse_info,
+
+                (
+                    SELECT stock_qty FROM (
+                        SELECT quantity AS stock_qty FROM inventory.stock 
+                        WHERE warehouse_id = wh_view.wh_id AND product_id = %s
+                        UNION ALL
+                        SELECT 0
+                    ) s LIMIT 1
+                ) AS available_qty,
+
+                (
+                    SELECT res_sum FROM (
+                        SELECT SUM(quantity) AS res_sum FROM inventory.order_reserves 
+                        WHERE warehouse_id = wh_view.wh_id AND product_id = %s
+                        UNION ALL
+                        SELECT 0
+                    ) r WHERE res_sum IS NOT NULL LIMIT 1
+                ) AS reserved_qty,
+
+                (
+                    SELECT stock_qty FROM (
+                        SELECT quantity AS stock_qty FROM inventory.stock 
+                        WHERE warehouse_id = wh_view.wh_id AND product_id = %s
+                        UNION ALL
+                        SELECT 0
+                    ) s LIMIT 1
+                ) + (
+                    SELECT res_sum FROM (
+                        SELECT SUM(quantity) AS res_sum FROM inventory.order_reserves 
+                        WHERE warehouse_id = wh_view.wh_id AND product_id = %s
+                        UNION ALL
+                        SELECT 0
+                    ) r WHERE res_sum IS NOT NULL LIMIT 1
+                ) AS total_qty
+
+            FROM (
+                SELECT 
+                    w.id AS wh_id,
+                    c.name || ', ' || w.address || (
+                        SELECT lbl FROM (
+                            SELECT ' (' || label || ')' AS lbl FROM catalog.warehouses WHERE id = w.id AND label IS NOT NULL
+                            UNION ALL
+                            SELECT ''
+                        ) l LIMIT 1
+                    ) AS warehouse_info
+                FROM catalog.warehouses w
+                JOIN catalog.cities c ON w.city = c.name
+            ) wh_view
+
+            WHERE (
+                (
+                    SELECT stock_qty FROM (
+                        SELECT quantity AS stock_qty FROM inventory.stock 
+                        WHERE warehouse_id = wh_view.wh_id AND product_id = %s
+                        UNION ALL
+                        SELECT 0
+                    ) s LIMIT 1
+                ) + (
+                    SELECT res_sum FROM (
+                        SELECT SUM(quantity) AS res_sum FROM inventory.order_reserves 
+                        WHERE warehouse_id = wh_view.wh_id AND product_id = %s
+                        UNION ALL
+                        SELECT 0
+                    ) r WHERE res_sum IS NOT NULL LIMIT 1
+                )
+            ) > 0
+
+            ORDER BY available_qty DESC;
+        """, (p_id, p_id, p_id, p_id, p_id, p_id))
         stocks = cur.fetchall()
 
     if not stocks:
-        console.print("[red]Данный товар полностью отсутствует на всех обычных складах системы.[/red]")
+        console.print("[red]Данный товар сейчас полностью отсутствует на всех складах системы.[/red]")
         return
 
-    for wh_full_name, qty in stocks:
-        table.add_row(wh_full_name, str(qty))
+    for wh_name, available, reserved, total in stocks:
+        table.add_row(wh_name, str(available), str(reserved), str(total))
+
     console.print(table)
-    
+
     
     
     
