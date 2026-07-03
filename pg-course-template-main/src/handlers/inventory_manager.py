@@ -278,52 +278,27 @@ def view_warehouse_stock() -> None:
 
     with conn.cursor() as cur:
         cur.execute("""
+            WITH current_stock AS (
+                SELECT product_id, quantity 
+                FROM inventory.stock 
+                WHERE warehouse_id = %s
+            ),
+            current_reserves AS (
+                SELECT product_id, SUM(quantity) AS reserved_qty 
+                FROM inventory.order_reserves 
+                WHERE warehouse_id = %s
+                GROUP BY product_id
+            )
             SELECT 
-                main_view.product_info,
-                main_view.available_qty,
-
-                (
-                    SELECT r_sum 
-                    FROM (
-                        SELECT SUM(quantity) AS r_sum FROM inventory.order_reserves 
-                        WHERE product_id = main_view.p_id AND warehouse_id = %s
-                        UNION ALL
-                        SELECT 0
-                    ) res_sub 
-                    WHERE r_sum IS NOT NULL 
-                    LIMIT 1
-                ) AS reserved_qty,
-
-                main_view.available_qty + (
-                    SELECT r_sum 
-                    FROM (
-                        SELECT SUM(quantity) AS r_sum FROM inventory.order_reserves 
-                        WHERE product_id = main_view.p_id AND warehouse_id = %s
-                        UNION ALL
-                        SELECT 0
-                    ) res_sub 
-                    WHERE r_sum IS NOT NULL 
-                    LIMIT 1
-                ) AS total_qty
-
-            FROM (
-                SELECT 
-                    p.id AS p_id,
-                    p.sku || ' - ' || p.name AS product_info,
-                    (
-                        SELECT qty 
-                        FROM (
-                            SELECT quantity AS qty FROM inventory.stock 
-                            WHERE product_id = p.id AND warehouse_id = %s
-                            UNION ALL
-                            SELECT 0
-                        ) stock_sub 
-                        LIMIT 1
-                    ) AS available_qty
-                FROM catalog.products p
-            ) main_view
-            ORDER BY main_view.product_info;
-        """, (wh_id, wh_id, wh_id))
+                p.sku || ' - ' || p.name AS product_info,
+                COALESCE(s.quantity, 0) AS available_qty,
+                COALESCE(r.reserved_qty, 0) AS reserved_qty,
+                (COALESCE(s.quantity, 0) + COALESCE(r.reserved_qty, 0)) AS total_qty
+            FROM catalog.products p
+            LEFT JOIN current_stock s ON s.product_id = p.id
+            LEFT JOIN current_reserves r ON r.product_id = p.id
+            ORDER BY p.name;
+        """, (wh_id, wh_id))
         stocks = cur.fetchall()
 
     for prod, available, reserved, total in stocks:
@@ -335,8 +310,8 @@ def view_warehouse_stock() -> None:
     console.print(table)
 
 
-@command("view product stock", "вывод остатков конкретного продукта на всех складах", CATEGORY_INVENTORY_READ,
-         [ROLE_INVENTORY_MANAGER])
+@command("view product stock", "вывод остатков конкретного продукта на всех складах (конвейер подзапросов)",
+         CATEGORY_INVENTORY_READ, [ROLE_INVENTORY_MANAGER])
 def view_product_stock() -> None:
     conn = get_conn()
     prod_options = _get_products_options()
@@ -359,75 +334,39 @@ def view_product_stock() -> None:
         cur.execute("""
             SELECT 
                 wh_view.warehouse_info,
-
-                (
-                    SELECT stock_qty FROM (
-                        SELECT quantity AS stock_qty FROM inventory.stock 
-                        WHERE warehouse_id = wh_view.wh_id AND product_id = %s
-                        UNION ALL
-                        SELECT 0
-                    ) s LIMIT 1
-                ) AS available_qty,
-
-                (
-                    SELECT res_sum FROM (
-                        SELECT SUM(quantity) AS res_sum FROM inventory.order_reserves 
-                        WHERE warehouse_id = wh_view.wh_id AND product_id = %s
-                        UNION ALL
-                        SELECT 0
-                    ) r WHERE res_sum IS NOT NULL LIMIT 1
-                ) AS reserved_qty,
-
-                (
-                    SELECT stock_qty FROM (
-                        SELECT quantity AS stock_qty FROM inventory.stock 
-                        WHERE warehouse_id = wh_view.wh_id AND product_id = %s
-                        UNION ALL
-                        SELECT 0
-                    ) s LIMIT 1
-                ) + (
-                    SELECT res_sum FROM (
-                        SELECT SUM(quantity) AS res_sum FROM inventory.order_reserves 
-                        WHERE warehouse_id = wh_view.wh_id AND product_id = %s
-                        UNION ALL
-                        SELECT 0
-                    ) r WHERE res_sum IS NOT NULL LIMIT 1
-                ) AS total_qty
-
+                calc_total.available_qty,
+                calc_total.reserved_qty,
+                calc_total.total_qty
             FROM (
                 SELECT 
                     w.id AS wh_id,
-                    c.name || ', ' || w.address || (
-                        SELECT lbl FROM (
-                            SELECT ' (' || label || ')' AS lbl FROM catalog.warehouses WHERE id = w.id AND label IS NOT NULL
-                            UNION ALL
-                            SELECT ''
-                        ) l LIMIT 1
-                    ) AS warehouse_info
+                    c.name || ', ' || w.address || COALESCE(' (' || w.label || ')', '') AS warehouse_info
                 FROM catalog.warehouses w
                 JOIN catalog.cities c ON w.city = c.name
             ) wh_view
-
-            WHERE (
-                (
-                    SELECT stock_qty FROM (
-                        SELECT quantity AS stock_qty FROM inventory.stock 
-                        WHERE warehouse_id = wh_view.wh_id AND product_id = %s
-                        UNION ALL
-                        SELECT 0
-                    ) s LIMIT 1
-                ) + (
-                    SELECT res_sum FROM (
-                        SELECT SUM(quantity) AS res_sum FROM inventory.order_reserves 
-                        WHERE warehouse_id = wh_view.wh_id AND product_id = %s
-                        UNION ALL
-                        SELECT 0
-                    ) r WHERE res_sum IS NOT NULL LIMIT 1
-                )
-            ) > 0
-
-            ORDER BY available_qty DESC;
-        """, (p_id, p_id, p_id, p_id, p_id, p_id))
+            JOIN (
+                SELECT 
+                    raw_data.wh_id,
+                    raw_data.available_qty,
+                    raw_data.reserved_qty,
+                    (raw_data.available_qty + raw_data.reserved_qty) AS total_qty
+                FROM (
+                    SELECT 
+                        w_sub.id AS wh_id,
+                        COALESCE(
+                            (SELECT quantity FROM inventory.stock 
+                             WHERE warehouse_id = w_sub.id AND product_id = %s), 0
+                        ) AS available_qty,
+                        COALESCE(
+                            (SELECT SUM(quantity) FROM inventory.order_reserves 
+                             WHERE warehouse_id = w_sub.id AND product_id = %s), 0
+                        ) AS reserved_qty
+                    FROM catalog.warehouses w_sub
+                ) raw_data
+            ) calc_total ON wh_view.wh_id = calc_total.wh_id
+            WHERE calc_total.total_qty > 0
+            ORDER BY calc_total.available_qty DESC, wh_view.warehouse_info;
+        """, (p_id, p_id))
         stocks = cur.fetchall()
 
     if not stocks:
@@ -438,6 +377,7 @@ def view_product_stock() -> None:
         table.add_row(wh_name, str(available), str(reserved), str(total))
 
     console.print(table)
+
 
     
     
