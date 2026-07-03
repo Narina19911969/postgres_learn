@@ -172,64 +172,71 @@ def list_orders_my() -> None:
             table.add_row(str(r[0]), r[1], f"{r[2]:,.2f} руб.", r[3], r[4].strftime("%Y-%m-%d %H:%M"))
     console.print(table)
 
-@command("mark order processing", "взять заказ из статуса 'new' в обработку (транзакция с блокировкой строки)",
-         CATEGORY_INVENTORY_READ, [ROLE_INVENTORY_MANAGER])
+
+@command("mark order processing",
+         "взять заказ из статуса 'new' в обработку (двухфазный паттерн без блокировок во время инпута)",
+         CATEGORY_INVENTORY_MGMT, [ROLE_INVENTORY_MANAGER])
 def mark_order_processing(order_id: str) -> None:
     conn = get_conn()
     o_id = int(order_id)
     user_id = auth_user().id
 
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT o.id, o.status, o.total_amount, c.name || ', ' || w.address, u.username
+            FROM sales.orders o
+            JOIN catalog.warehouses w ON o.warehouse_id = w.id
+            JOIN catalog.cities c ON w.city = c.name
+            JOIN auth.users u ON o.created_by = u.id
+            WHERE o.id = %s
+        """, (o_id,))
+        order = cur.fetchone()
+
+    if not order:
+        render_error(f"Заказ с ID {o_id} не найден в системе.")
+        return
+
+    status = order[1]
+    if status != 'new':
+        render_error(f"Невозможно взять заказ в работу. Его текущий статус: '{status}', ожидался 'new'.")
+        return
+
+    console.print(f"\n[bold yellow]Запрос на обслуживание заказа #{order[0]}[/bold yellow]")
+    console.print(f" Склад отгрузки: {order[3]}")
+    console.print(f" Сумма заказа:   {order[2]:,.2f} руб.")
+    console.print(f" Создатель:      {order[4]}")
+
+    ans = prompt("\nВы уверены, что хотите заявить права и взять этот заказ в обработку? (y/n, д/н): ",
+                 validator=YesNoValidator())
+
+    if not YesNoValidator.is_yes(ans):
+        console.print("[yellow]Операция отменена менеджером.[/yellow]")
+        return
+
     try:
-        with conn.cursor() as cur:
-            cur.execute("BEGIN;")
 
-            cur.execute("""
-                SELECT o.id, o.status, o.total_amount, c.name || ', ' || w.address, u.username
-                FROM sales.orders o
-                JOIN catalog.warehouses w ON o.warehouse_id = w.id
-                JOIN catalog.cities c ON w.city = c.name
-                JOIN auth.users u ON o.created_by = u.id
-                WHERE o.id = %s
-                FOR UPDATE OF o
-            """, (o_id,))
-            order = cur.fetchone()
+        with conn.transaction():
+            with conn.cursor() as cur:
 
-            if not order:
-                render_error(f"Заказ с ID {o_id} не найден в системе.")
-                cur.execute("ROLLBACK;")
-                return
+                cur.execute("""
+                    SELECT status FROM sales.orders o WHERE id = %s FOR UPDATE OF o
+                """, (o_id,))
+                lock_row = cur.fetchone()
 
-            status = order[1]
-            if status != 'new':
-                render_error(f"Невозможно взять заказ в работу. Его текущий статус: '{status}', ожидался 'new'.")
-                cur.execute("ROLLBACK;")
-                return
+                if not lock_row or lock_row[0] != 'new':
+                    render_error(
+                        "[red]Ошибка гонки данных: пока вы подтверждали операцию, другой менеджер уже перехватил этот заказ![/red]")
+                    return
 
-            console.print(f"\n[bold yellow]Запрос на обслуживание заказа #{order[0]}[/bold yellow]")
-            console.print(f" Склад отгрузки: {order[3]}")
-            console.print(f" Сумма заказа:   {order[2]:,.2f} руб.")
-            console.print(f" Создатель:      {order[4]}")
-
-            ans = prompt("\nВы уверены, что хотите заявить права и взять этот заказ в обработку? (y/n, д/н): ",
-                         validator=YesNoValidator())
-
-            if YesNoValidator.is_yes(ans):
                 cur.execute("""
                     UPDATE sales.orders 
                     SET status = 'processing', created_by = %s 
                     WHERE id = %s
                 """, (user_id, o_id))
 
-                cur.execute("COMMIT;")
-                console.print(
-                    f"[green]✓ Заказ #{o_id} успешно закреплен за вами и переведен в статус 'processing'.[/green]")
-            else:
-                cur.execute("ROLLBACK;")
-                console.print("[yellow]Операция отменена менеджером. Блокировка снята.[/yellow]")
+        console.print(f"[green]✓ Заказ #{o_id} успешно заблокирован и закреплен за вами в СУБД.[/green]")
 
     except Exception as e:
-        with conn.cursor() as cur:
-            cur.execute("ROLLBACK;")
         render_error(f"Критическая ошибка транзакции: {e}")
 
 @command("start shipping", "перевести перемещение из статуса planned в статус shipping для начала отгрузки воркером", CATEGORY_INVENTORY_MGMT, [ROLE_INVENTORY_MANAGER])
@@ -494,58 +501,64 @@ def add_transfer_items() -> None:
     dst_id = choice("Шаг 2: Выберите склад ПОЛУЧЕНИЯ:", options=dst_warehouses)
     if dst_id is None: return
 
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT p.id, p.sku || ' - ' || p.name, s.quantity 
+            FROM inventory.stock s
+            JOIN catalog.products p ON s.product_id = p.id
+            WHERE s.warehouse_id = %s AND s.quantity > 0
+        """, (src_id,))
+        stock_items = cur.fetchall()
+
+    if not stock_items:
+        render_error("На складе отправления нет доступных товаров для перемещения.")
+        return
+
+    options = [(p[0], f"{p[1]} [Доступно: {p[2]} шт.]") for p in stock_items]
+    chosen_product_id = choice("Шаг 3: Выберите товар для перемещения:", options=options)
+    if chosen_product_id is None: return
+
+    target_item = next(p for p in stock_items if p[0] == chosen_product_id)
+    available_qty = target_item[2]
+
+    qty_str = prompt(f"Шаг 4: Укажите количество товара для перемещения (макс. {available_qty}): ",
+                     validator=QuantityValidator()).strip()
+    req_qty = int(qty_str)
+
+    if req_qty > available_qty:
+        render_error("Ошибка бизнес-логики: Запрошено больше, чем есть на свободном остатке склада!")
+        return
+
+    ans = prompt(f"Шаг 5: Подтверждаете добавление {req_qty} шт. в накладную? (y/n): ", validator=YesNoValidator())
+    if not YesNoValidator.is_yes(ans):
+        console.print("[yellow]Операция полностью отменена. База данных не затрагивалась.[/yellow]")
+        return
+
     try:
-        while True:
+        with conn.transaction():
             with conn.cursor() as cur:
-                cur.execute("BEGIN;")
+
+                cur.execute("SELECT id FROM catalog.warehouses WHERE id = %s FOR UPDATE", (src_id,))
+
                 cur.execute("""
-                    SELECT p.id, p.sku || ' - ' || p.name, s.quantity 
-                    FROM inventory.stock s
-                    JOIN catalog.products p ON s.product_id = p.id
-                    WHERE s.warehouse_id = %s AND s.quantity > 0
-                    FOR UPDATE
-                """, (src_id,))
-                stock_items = cur.fetchall()
+                    SELECT quantity FROM inventory.stock 
+                    WHERE warehouse_id = %s AND product_id = %s FOR UPDATE
+                """, (src_id, chosen_product_id))
+                stock_row = cur.fetchone()
 
-            options = [(p[0], f"{p[1]} [Доступно: {p[2]} шт.]") for p in stock_items]
-            options.append((None, "--> ЗАВЕРШИТЬ ПРОЦЕСС ДОБАВЛЕНИЯ <--"))
+                actual_stock = stock_row[0] if stock_row else 0
+                if actual_stock < req_qty:
+                    render_error(
+                        "[red]Ошибка транзакции: за время подтверждения свободный остаток товара изменился![/red]")
+                    return
 
-            product_id = choice("Шаг 3: Выберите товар для перемещения:", options=options)
-
-            if product_id is None:
-                with conn.cursor() as cur:
-                    cur.execute("COMMIT;")
-                console.print("[green]Формирование перемещения успешно завершено.[/green]")
-                break
-
-            available_qty = next(p[2] for p in stock_items if p[0] == product_id)
-
-            qty_str = prompt(f"Шаг 4: Укажите количество товара для перемещения (макс. {available_qty}): ",
-                             validator=QuantityValidator()).strip()
-            req_qty = int(qty_str)
-
-            if req_qty > available_qty:
-                render_error("Ошибка бизнес-логики: Недостаточно свободного товара на складе отправления!")
-                with conn.cursor() as cur:
-                    cur.execute("ROLLBACK;")
-                continue
-
-            ans = prompt(f"Шаг 5: Подтверждаете добавление {req_qty} шт. в накладную? (y/n): ",
-                         validator=YesNoValidator())
-
-            if not YesNoValidator.is_yes(ans):
-                with conn.cursor() as cur:
-                    cur.execute("ROLLBACK;")
-                console.print("[yellow]Добавление позиции отменено. Возврат к выбору товара (Шаг 3).[/yellow]")
-                continue
-
-            with conn.cursor() as cur:
                 cur.execute("""
                     SELECT id FROM inventory.transfers 
                     WHERE src_warehouse_id = %s AND dst_warehouse_id = %s AND status = 'planned'
                     FOR UPDATE
                 """, (src_id, dst_id))
                 t_row = cur.fetchone()
+
                 t_id = t_row[0] if t_row else None
 
                 if not t_id:
@@ -556,16 +569,16 @@ def add_transfer_items() -> None:
                     t_id = cur.fetchone()[0]
 
                 cur.execute("""
-                    SELECT id, quantity FROM inventory.transfer_items
+                    SELECT id FROM inventory.transfer_items
                     WHERE transfer_id = %s AND created_by = %s AND product_id = %s AND order_id IS NULL
                     FOR UPDATE
-                """, (t_id, user_id, product_id))
+                """, (t_id, user_id, chosen_product_id))
                 existing_item = cur.fetchone()
 
                 cur.execute("""
                     UPDATE inventory.stock SET quantity = quantity - %s 
                     WHERE warehouse_id = %s AND product_id = %s
-                """, (req_qty, src_id, product_id))
+                """, (req_qty, src_id, chosen_product_id))
 
                 if existing_item:
                     ti_id = existing_item[0]
@@ -578,34 +591,32 @@ def add_transfer_items() -> None:
                     cur.execute("""
                         INSERT INTO inventory.transfer_items (transfer_id, product_id, quantity, status, created_by, order_id)
                         VALUES (%s, %s, %s, 'planned', %s, NULL)
-                    """, (t_id, product_id, req_qty, user_id))
+                    """, (t_id, chosen_product_id, req_qty, user_id))
 
-                cur.execute("COMMIT;")
-            console.print(f"[green]✓ {req_qty} шт. успешно списано со склада и добавлено в Трансфер #{t_id}.[/green]")
+        console.print(
+            f"[bold green]✓ Операция успешно завершена! {req_qty} шт. добавлены в Трансфер #{t_id}.[/bold green]")
 
     except Exception as e:
-        with conn.cursor() as cur:
-            cur.execute("ROLLBACK;")
-        render_error(f"Критическая ошибка в мастере добавления: {e}")
+        render_error(f"Критическая ошибка при записи в БД: {e}")
 
-@command("remove transfer items", "интерактивное удаление товаров из перемещения (с возвратом остатков)",
+
+@command("remove transfer items", "интерактивное удаление товаров из перемещения (двухфазный паттерн без инпутов)",
          CATEGORY_INVENTORY_MGMT, [ROLE_INVENTORY_MANAGER])
 def remove_transfer_items() -> None:
     conn = get_conn()
     user_id = auth_user().id
-
     with conn.cursor() as cur:
         cur.execute("""
-             SELECT DISTINCT t.id, c1.name || ' -> ' || c2.name 
-             FROM inventory.transfers t
-             JOIN inventory.transfer_items ti ON ti.transfer_id = t.id
-             JOIN catalog.warehouses w1 ON t.src_warehouse_id = w1.id
-             JOIN catalog.warehouses w2 ON t.dst_warehouse_id = w2.id
-             JOIN catalog.cities c1 ON w1.city = c1.name
-             JOIN catalog.cities c2 ON w2.city = c2.name
-             WHERE t.status = 'planned' AND ti.created_by = %s
-             ORDER BY t.id
-         """, (user_id,))
+            SELECT DISTINCT t.id, c1.name || ' -> ' || c2.name 
+            FROM inventory.transfers t
+            JOIN inventory.transfer_items ti ON ti.transfer_id = t.id
+            JOIN catalog.warehouses w1 ON t.src_warehouse_id = w1.id
+            JOIN catalog.warehouses w2 ON t.dst_warehouse_id = w2.id
+            JOIN catalog.cities c1 ON w1.city = c1.name
+            JOIN catalog.cities c2 ON w2.city = c2.name
+            WHERE t.status = 'planned' AND ti.created_by = %s
+            ORDER BY t.id
+        """, (user_id,))
         active_transfers = cur.fetchall()
 
     if not active_transfers:
@@ -615,84 +626,76 @@ def remove_transfer_items() -> None:
     t_id = choice("Шаг 1: Выберите накладную перемещения (Трансфер):", options=active_transfers)
     if t_id is None: return
 
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT ti.id, p.sku || ' - ' || p.name, ti.quantity, t.src_warehouse_id, ti.product_id
+            FROM inventory.transfer_items ti
+            JOIN inventory.transfers t ON ti.transfer_id = t.id
+            JOIN catalog.products p ON ti.product_id = p.id
+            WHERE ti.transfer_id = %s AND ti.created_by = %s AND ti.status = 'planned'
+        """, (t_id, user_id))
+        items = cur.fetchall()
+
+    if not items:
+        render_error("В этой накладной больше нет ваших запланированных позиций.")
+        return
+
+    options = [(row[0], f"{row[1]} [В машине: {row[2]} шт.]") for row in items]
+    selected_ti_id = choice("Шаг 2: Выберите позицию для удаления/уменьшения:", options=options)
+    if selected_ti_id is None: return
+
+    target_item = next(i for i in items if i[0] == selected_ti_id)
+    max_qty = target_item[2]
+    src_warehouse_id = target_item[3]
+    product_id = target_item[4]
+
+    qty_str = prompt(f"Шаг 3: Укажите количество для удаления (макс. {max_qty}): ",
+                     validator=QuantityValidator()).strip()
+    rem_qty = int(qty_str)
+
+    if rem_qty > max_qty:
+        render_error("Ошибка бизнес-логики: Нельзя извлечь больше товара, чем находится в машине!")
+        return
+
+    ans = prompt(f"Шаг 4: Подтверждаете извлечение {rem_qty} шт. из машины? (y/n): ", validator=YesNoValidator())
+    if not YesNoValidator.is_yes(ans):
+        console.print("[yellow]Операция отменена. Состав груза не изменялся.[/yellow]")
+        return
+
     try:
-        while True:
+        with conn.transaction():
             with conn.cursor() as cur:
-                cur.execute("BEGIN;")
 
                 cur.execute("""
-                     SELECT ti.id, p.sku || ' - ' || p.name, ti.quantity, ti.order_id, t.src_warehouse_id, ti.product_id
-                     FROM inventory.transfer_items ti
-                     JOIN inventory.transfers t ON ti.transfer_id = t.id
-                     JOIN catalog.products p ON ti.product_id = p.id
-                     WHERE ti.transfer_id = %s AND ti.created_by = %s AND ti.status = 'planned'
-                     FOR UPDATE
-                 """, (t_id, user_id))
-                items = cur.fetchall()
+                    SELECT quantity FROM inventory.transfer_items 
+                    WHERE id = %s AND status = 'planned' FOR UPDATE
+                """, (selected_ti_id,))
+                current_ti_row = cur.fetchone()
 
-            if not items:
-                console.print("[yellow]В этой накладной больше нет ваших запланированных позиций.[/yellow]")
-                with conn.cursor() as cur:
-                    cur.execute("COMMIT;")
-                break
+                if not current_ti_row or current_ti_row[0] < rem_qty:
+                    render_error(
+                        "[red]Ошибка транзакции: состав груза в машине изменился, пока вы подтверждали удаление![/red]")
+                    return
 
-            options = []
-            for item in items:
-                lbl = f" (Под заказ #{item[3]})" if item[3] else " (Прозапас)"
-                options.append((item[0], f"{item[1]}{lbl} [В машине: {item[2]} шт.]"))
-            options.append((None, "--> СТОП / ЗАВЕРШИТЬ УДАЛЕНИЕ <--"))
+                current_qty = current_ti_row[0]
 
-            selected_ti_id = choice("Шаг 2: Выберите позицию для удаления/уменьшения:", options=options)
-            if selected_ti_id is None:
-                with conn.cursor() as cur:
-                    cur.execute("COMMIT;")
-                break
-
-            target_item = next(i for i in items if i[0] == selected_ti_id)
-            max_qty = target_item[2]
-            order_id = target_item[3]
-            src_warehouse_id = target_item[4]
-            product_id = target_item[5]
-
-            qty_str = prompt(f"Шаг 3: Укажите количество для удаления (макс. {max_qty}): ",
-                             validator=QuantityValidator()).strip()
-            rem_qty = int(qty_str)
-
-            if rem_qty > max_qty:
-                render_error("Ошибка: Нельзя удалить больше, чем сейчас находится в накладной!")
-                with conn.cursor() as cur:
-                    cur.execute("ROLLBACK;")
-                continue
-
-            ans = prompt(f"Шаг 4: Подтверждаете извлечение {rem_qty} шт. из машины? (y/n): ",
-                         validator=YesNoValidator())
-            if not YesNoValidator.is_yes(ans):
-                with conn.cursor() as cur:
-                    cur.execute("ROLLBACK;")
-                console.print("[yellow]Удаление отменено.[/yellow]")
-                continue
-
-            with conn.cursor() as cur:
                 cur.execute("""
-                     INSERT INTO inventory.stock (warehouse_id, product_id, quantity) VALUES (%s, %s, %s)
-                     ON CONFLICT (warehouse_id, product_id) 
-                     DO UPDATE SET quantity = inventory.stock.quantity + EXCLUDED.quantity
-                 """, (src_warehouse_id, product_id, rem_qty))
+                    INSERT INTO inventory.stock (warehouse_id, product_id, quantity) VALUES (%s, %s, %s)
+                    ON CONFLICT (warehouse_id, product_id) 
+                    DO UPDATE SET quantity = inventory.stock.quantity + EXCLUDED.quantity
+                """, (src_warehouse_id, product_id, rem_qty))
 
-                if rem_qty == max_qty:
+                if rem_qty == current_qty:
                     cur.execute("DELETE FROM inventory.transfer_items WHERE id = %s", (selected_ti_id,))
                 else:
                     cur.execute("UPDATE inventory.transfer_items SET quantity = quantity - %s WHERE id = %s",
                                 (rem_qty, selected_ti_id))
 
-                cur.execute("COMMIT;")
-            console.print(
-                f"[green]✓ {rem_qty} шт. успешно извлечены из машины и вернулись на Склад #{src_warehouse_id}.[/green]")
+        console.print(
+            f"[bold green]✓ Операция успешна! {rem_qty} шт. извлечены из машины и вернулись на Склад #{src_warehouse_id}.[/bold green]")
 
     except Exception as e:
-        with conn.cursor() as cur:
-            cur.execute("ROLLBACK;")
-        render_error(f"Критическая ошибка в мастере удаления: {e}")
+        render_error(f"Критическая ошибка транзакции при удалении: {e}")
 
 
 @command("list transfers planned all", "вывод всех запланированных перемещений сгруппированных по маршрутам",
