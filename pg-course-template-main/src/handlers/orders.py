@@ -23,6 +23,7 @@ class Order:
     total_amount: float
     created_at: datetime
     warehouse_id: int
+    created_by: int
 
 
 @dataclass
