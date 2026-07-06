@@ -554,6 +554,7 @@ def add_transfer_items() -> None:
                 cur.execute("""
                     SELECT id FROM inventory.transfers 
                     WHERE src_warehouse_id = %s AND dst_warehouse_id = %s AND status = 'planned'
+                    FOR SHARE
                 """, (src_id, dst_id))
                 t_row = cur.fetchone()
                 t_id = t_row[0] if t_row else None
