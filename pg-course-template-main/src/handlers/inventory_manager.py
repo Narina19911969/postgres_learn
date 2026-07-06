@@ -10,6 +10,7 @@ from db import get_conn
 from auth import auth_user
 from validators import YesNoValidator, NonEmptyValidator
 from commands import command
+from psycopg.errors import SerializationFailure
 
 CATEGORY_INVENTORY_READ = "Инвентарь: Чтение и Обработка"
 ROLE_INVENTORY_MANAGER = "inventory_manager"
@@ -239,46 +240,44 @@ def mark_order_processing(order_id: str) -> None:
     except Exception as e:
         render_error(f"Критическая ошибка транзакции: {e}")
 
-@command("start shipping", "перевести перемещение из статуса planned в статус shipping для начала отгрузки воркером", CATEGORY_INVENTORY_MGMT, [ROLE_INVENTORY_MANAGER])
+
+@command("start shipping", "перевести перемещение из статуса planned в статус shipping для начала отгрузки воркером",
+         CATEGORY_INVENTORY_MGMT, [ROLE_INVENTORY_MANAGER])
 def start_shipping(transfer_id: str) -> None:
     conn = get_conn()
     t_id = int(transfer_id)
 
     try:
-        with conn.cursor() as cur:
-            cur.execute("BEGIN;")
+        with conn.transaction():
+            with conn.cursor() as cur:
 
-            cur.execute("""
-                SELECT status FROM inventory.transfers 
-                WHERE id = %s 
-                FOR UPDATE
-            """, (t_id,))
-            row = cur.fetchone()
+                cur.execute("""
+                    SELECT status FROM inventory.transfers 
+                    WHERE id = %s 
+                    FOR UPDATE
+                """, (t_id,))
+                row = cur.fetchone()
 
-            if not row:
-                render_error(f"Накладная межскладского перемещения #{t_id} не найдена.")
-                cur.execute("ROLLBACK;")
-                return
+                if not row:
+                    render_error(f"Накладная межскладского перемещения #{t_id} не найдена.")
+                    return
 
-            status = row[0]
-            if status != 'planned':
-                render_error(f"Невозможно запустить отгрузку. Текущий статус перемещения: '{status}', ожидался 'planned'.")
-                cur.execute("ROLLBACK;")
-                return
+                status = row[0]
+                if status != 'planned':
+                    render_error(
+                        f"Невозможно запустить отгрузку. Текущий статус перемещения: '{status}', ожидался 'planned'.")
+                    return
 
-            cur.execute("""
-                UPDATE inventory.transfers 
-                SET status = 'shipping' 
-                WHERE id = %s
-            """, (t_id,))
+                cur.execute("""
+                    UPDATE inventory.transfers 
+                    SET status = 'shipping' 
+                    WHERE id = %s
+                """, (t_id,))
 
-            cur.execute("COMMIT;")
-            console.print(f"[bold green]✓ Статус перемещения #{t_id} успешно изменен на 'shipping'.[/bold green]")
-            console.print("[green]Накладная передана в работу кладовщикам (worker) для попозиционной погрузки.[/green]")
+        console.print(f"[bold green]✓ Статус перемещения #{t_id} успешно изменен на 'shipping'.[/bold green]")
+        console.print("[green]Накладная передана в работу кладовщикам (worker) для попозиционной погрузки.[/green]")
 
     except Exception as e:
-        with conn.cursor() as cur:
-            cur.execute("ROLLBACK;")
         render_error(f"Критическая ошибка транзакции: {e}")
 
 @command("show order", "детальный просмотр карточки заказа и вычисляемых статусов его позиций", CATEGORY_INVENTORY_READ, [ROLE_INVENTORY_MANAGER])
@@ -461,7 +460,7 @@ def view_product_stock() -> None:
     console.print(table)
 
 
-@command("add transfer items", "интерактивное добавление товаров в перемещение (строго по шагам ТЗ)",
+@command("add transfer items", "интерактивное добавление товаров в перемещение (изоляция SERIALIZABLE)",
          CATEGORY_INVENTORY_MGMT, [ROLE_INVENTORY_MANAGER])
 def add_transfer_items() -> None:
     conn = get_conn()
@@ -538,7 +537,7 @@ def add_transfer_items() -> None:
         with conn.transaction():
             with conn.cursor() as cur:
 
-                cur.execute("SELECT id FROM catalog.warehouses WHERE id = %s FOR UPDATE", (src_id,))
+                cur.execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;")
 
                 cur.execute("""
                     SELECT quantity FROM inventory.stock 
@@ -555,10 +554,8 @@ def add_transfer_items() -> None:
                 cur.execute("""
                     SELECT id FROM inventory.transfers 
                     WHERE src_warehouse_id = %s AND dst_warehouse_id = %s AND status = 'planned'
-                    FOR UPDATE
                 """, (src_id, dst_id))
                 t_row = cur.fetchone()
-
                 t_id = t_row[0] if t_row else None
 
                 if not t_id:
@@ -571,7 +568,6 @@ def add_transfer_items() -> None:
                 cur.execute("""
                     SELECT id FROM inventory.transfer_items
                     WHERE transfer_id = %s AND created_by = %s AND product_id = %s AND order_id IS NULL
-                    FOR UPDATE
                 """, (t_id, user_id, chosen_product_id))
                 existing_item = cur.fetchone()
 
@@ -593,12 +589,13 @@ def add_transfer_items() -> None:
                         VALUES (%s, %s, %s, 'planned', %s, NULL)
                     """, (t_id, chosen_product_id, req_qty, user_id))
 
-        console.print(
-            f"[bold green]✓ Операция успешно завершена! {req_qty} шт. добавлены в Трансфер #{t_id}.[/bold green]")
+        console.print(f"[bold green]✓ Операция успешно завершена! {req_qty} шт. добавлены в ...[/bold green]")
 
+    except SerializationFailure:
+        render_error(
+            "[red]Ошибка гонки данных: параллельный менеджер изменил накладные на этом маршруте. Пожалуйста, повторите попытку.[/red]")
     except Exception as e:
         render_error(f"Критическая ошибка при записи в БД: {e}")
-
 
 @command("remove transfer items", "интерактивное удаление товаров из перемещения (двухфазный паттерн без инпутов)",
          CATEGORY_INVENTORY_MGMT, [ROLE_INVENTORY_MANAGER])
