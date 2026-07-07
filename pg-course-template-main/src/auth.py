@@ -15,6 +15,7 @@ ALL_ROLES: Final[Sequence[str]] = (
     ROLE_SALES_MANAGER,
     ROLE_CATALOG_MANAGER,
     ROLE_INVENTORY_MANAGER,
+    ROLE_WORKER
 )
 
 _USER: User | None = None
