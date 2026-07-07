@@ -1,0 +1,28 @@
+Вывести количество всех незавершенных (статус отличный от shipping) заказов, сгруппированных по статусам. Какой индекс здесь надо применить и почему именно частичный? Сравните размер полного и частичного индексов.
+
+SELECT status, COUNT(*) AS count
+FROM sales.orders
+WHERE status != 'shipped'
+GROUP BY status;
+
+new	1009
+packing	976
+pending	1057
+processing	981
+unpublished	977
+
+Finalize GroupAggregate  (cost=8303.27..8305.03 rows=6 width=16) (actual time=16.647..19.495 rows=5.00 loops=1)
+
+
+CREATE INDEX idx_orders_status_partial ON sales.orders(status) WHERE status != 'shipped';
+SELECT pg_size_pretty(pg_relation_size('sales.idx_orders_status_partial'));
+
+
+Размер полного индекса - 3408 kB
+Частичного - 56 kB
+
+
+После частичного
+GroupAggregate  (cost=0.28..141.15 rows=6 width=16) (actual time=0.235..0.989 rows=5.00 loops=1)
+
+Частичный больше подходит, так как у нас намного меньше товаров со статусом не shipped.

@@ -1,0 +1,70 @@
+Сколько товаров было реализовано со склада в Москве за 2025 год. А за первые 15 дней января 2025го года? А за один день 2025-01-10?
+
+SELECT SUM(oi.quantity) AS total_items_sold
+FROM sales.orders o
+JOIN sales.order_items oi ON oi.order_id = o.id
+JOIN catalog.warehouses w ON o.warehouse_id = w.id
+WHERE o.status = 'shipped'
+  AND w.label LIKE '%Москва'
+  AND o.created_at >= '2025-01-01 00:00:00' 
+  AND o.created_at < '2026-01-01 00:00:00';
+Finalize Aggregate  (cost=15654.46..15654.47 rows=1 width=8) (actual time=41.561..44.476 rows=1.00 loops=1)
+1 row(s) fetched - 0.074s, on 2026-07-07 at 13:19:22
+Ответ - 200048
+Finalize Aggregate  (cost=15631.13..15631.14 rows=1 width=8) (actual time=34.829..37.911 rows=1.00 loops=1)
+Execution Time: 44.518 ms
+
+CREATE INDEX idx_warehouses_label_pattern ON catalog.warehouses(reverse(label) text_pattern_ops);
+CREATE INDEX idx_orders_wh_date ON sales.orders(warehouse_id, created_at) WHERE status = 'shipped';
+CREATE INDEX idx_order_items_order_id ON sales.order_items(order_id);
+
+индексы не помогли, потому что большой диапазон по времени
+
+///////////////////////////////////////////////////////////////
+А за первые 15 дней января 2025го года?
+///////////////////////////////////////////////////////////////
+SELECT SUM(oi.quantity) AS total_items_sold
+FROM sales.orders o
+JOIN sales.order_items oi ON oi.order_id = o.id
+JOIN catalog.warehouses w ON o.warehouse_id = w.id
+WHERE o.status = 'shipped'
+  AND w.label LIKE '%Москва'
+  AND o.created_at >= '2025-01-01 00:00:00' 
+  AND o.created_at < '2025-01-16 00:00:00';
+Finalize Aggregate  (cost=11200.82..11200.83 rows=1 width=8) (actual time=12.599..14.834 rows=1.00 loops=1)
+Execution Time: 17.710 ms
+Ответ - 8429
+
+после индексов
+
+CREATE INDEX idx_orders_date_shipped_btree 
+ON sales.orders(created_at) WHERE status = 'shipped';
+
+CREATE INDEX idx_order_items_order_fk 
+ON sales.order_items(order_id);
+
+Finalize Aggregate  (cost=7352.67..7352.68 rows=1 width=8) (actual time=6.591..8.815 rows=1.00 loops=1)
+Execution Time: 8.853 ms
+
+////////////////////////////////////////////////////////////
+ А за один день 2025-01-10?
+////////////////////////////////////////////////////////////
+SELECT SUM(oi.quantity) AS total_items_sold
+FROM sales.orders o
+JOIN sales.order_items oi ON oi.order_id = o.id
+JOIN catalog.warehouses w ON o.warehouse_id = w.id
+WHERE o.status = 'shipped'
+  AND w.label LIKE '%Москва'
+  AND o.created_at >= '2025-01-10 00:00:00' 
+  AND o.created_at < '2025-01-11 00:00:00';
+
+Finalize Aggregate  (cost=9607.45..9607.46 rows=1 width=8) (actual time=11.759..13.876 rows=1.00 loops=1)
+Execution Time: 13.921 ms
+Ответ - 606
+
+create index war_id ON sales.orders(warehouse_id); 
+CREATE INDEX idx_orders_date_btree ON sales.orders(created_at) WHERE status = 'shipped';
+
+ускорился поиск
+Aggregate  (cost=915.44..915.45 rows=1 width=8) (actual time=4.751..4.752 rows=1.00 loops=1)
+Execution Time: 4.840 ms

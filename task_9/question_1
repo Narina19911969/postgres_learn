@@ -1,0 +1,37 @@
+Вывести топ-10 самых продаваемых товаров по количеству
+
+
+SELECT 
+    p.id,
+    p.sku || ' - ' || p.name AS product_info,
+    SUM(oi.quantity) AS total_quantity
+FROM sales.order_items oi
+JOIN sales.orders o ON oi.order_id = o.id
+JOIN catalog.products p ON oi.product_id = p.id
+WHERE o.status = 'shipped'
+GROUP BY p.id, p.sku, p.name
+ORDER BY total_quantity DESC
+LIMIT 10;
+
+Limit  (cost=40888.25..40888.27 rows=10 width=82) (actual time=315.118..318.592 rows=10.00 loops=1)
+
+668	RGU779996 - MSI Умная колонка VMF1Q	6575
+143	TIN074036 - Nikon Ноутбук 4G2HS	6532
+372	JUH078026 - Sony Наушники GHWPH	6507
+912	WLY611111 - HP Процессор OI80O	6419
+296	CDG462035 - Dell Телевизор IZ2SD	6393
+447	BMZ183050 - Apple Консоль OI15K	6358
+749	LSF647791 - Dell Камера FCSNS	6345
+509	MAR858058 - Samsung Клавиатура N37MI	6335
+705	FRY672964 - Dyson Камера ATA9O	6334
+456	HFK921504 - Apple Консоль AQM8M	6330
+
+
+
+CREATE INDEX idx_orders_status_shipped ON sales.orders(id) WHERE status = 'shipped';
+CREATE INDEX idx_order_items_prod_qty ON sales.order_items(product_id, quantity, order_id);
+
+
+Limit  (cost=40895.72..40895.75 rows=10 width=82) (actual time=338.826..343.072 rows=10.00 loops=1)
+
+Вообще индексы не помогли так как большинство товаров shipped, и чтоб вывести топ 10 надо все считать 
