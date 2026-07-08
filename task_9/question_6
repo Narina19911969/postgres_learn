@@ -1,28 +1,37 @@
 Вывести топ-3 товара по выручке внутри каждой категории.
 
 
+WITH product_revenues AS (
+    SELECT 
+        p.category_id,
+        p.id AS product_id,
+        p.name AS product_name,
+        SUM(oi.quantity * oi.price) AS total_revenue
+    FROM sales.order_items oi
+    JOIN sales.orders o ON oi.order_id = o.id
+    JOIN catalog.products p ON oi.product_id = p.id
+    WHERE o.status = 'shipped' 
+    GROUP BY p.category_id, p.id, p.name
+),
+ranked_catalog AS (
+    SELECT 
+        category_id,
+        product_id,
+        product_name,
+        total_revenue,
+        DENSE_RANK() OVER (
+            PARTITION BY category_id 
+            ORDER BY total_revenue DESC
+        ) AS rank
+    FROM product_revenues
+)
 SELECT 
     category_id,
     product_id,
     product_name,
     total_revenue
-FROM (
-    SELECT 
-        p.category_id,
-        p.id AS product_id,
-        p.name AS product_name,
-        SUM(oi.quantity * oi.price) AS total_revenue,
-        DENSE_RANK() OVER (
-            PARTITION BY p.category_id 
-            ORDER BY SUM(oi.quantity * oi.price) DESC
-        ) AS rank
-    FROM sales.order_items oi
-    JOIN sales.orders o ON oi.order_id = o.id
-    JOIN catalog.products p ON oi.product_id = p.id
-    WHERE o.status = 'shipped'
-    GROUP BY p.category_id, p.id, p.name
-) ranked_products
-WHERE rank <= 3 
+FROM ranked_catalog
+WHERE rank <= 3
 ORDER BY category_id, total_revenue DESC;
 
 1	16	Huawei Смартфон 7X5SL	888858725.15
