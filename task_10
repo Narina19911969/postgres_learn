@@ -1,0 +1,107 @@
+CREATE OR REPLACE FUNCTION inventory.create_delivery_from_reserve(p_order_id INT)
+RETURNS VOID AS $$
+DECLARE
+    v_target_wh_id INT;
+    v_delivery_id INT;
+    v_res_record RECORD;
+BEGIN
+    SELECT warehouse_id INTO v_target_wh_id 
+    FROM sales.orders 
+    WHERE id = p_order_id;
+
+    INSERT INTO sales.deliveries (order_id, warehouse_id, status, created_at)
+    VALUES (p_order_id, v_target_wh_id, 'planned', NOW())
+    RETURNING id INTO v_delivery_id;
+
+    FOR v_res_record IN 
+        SELECT product_id, quantity 
+        FROM inventory.order_reserves 
+        WHERE order_id = p_order_id
+    LOOP
+        INSERT INTO sales.delivery_items (delivery_id, product_id, quantity, status)
+        VALUES (v_delivery_id, v_res_record.product_id, v_res_record.quantity, 'planned');
+    END LOOP;
+
+    DELETE FROM inventory.order_reserves 
+    WHERE order_id = p_order_id;
+
+    UPDATE sales.orders 
+    SET status = 'packing' 
+    WHERE id = p_order_id;
+
+    RAISE NOTICE 'Заказ #% успешно переведен в packing. Создана доставка #%', p_order_id, v_delivery_id;
+END;
+$$ LANGUAGE plpgsql
+SECURITY DEFINER;
+
+
+////////////////////////////////////////////////////////////////////////////
+Триггер на обновление статуса заказа для создания доставки
+CREATE OR REPLACE FUNCTION sales.trg_order_status_to_pending_fn()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_total_required INT;
+    v_total_reserved INT;
+BEGIN
+    IF NEW.status = 'pending' AND OLD.status != 'pending' THEN
+        
+        SELECT COALESCE(SUM(quantity), 0) INTO v_total_required
+        FROM sales.order_items
+        WHERE order_id = NEW.id;
+
+        SELECT COALESCE(SUM(quantity), 0) INTO v_total_reserved
+        FROM inventory.order_reserves
+        WHERE order_id = NEW.id;
+
+        IF v_total_required > 0 AND v_total_required = v_total_reserved THEN
+            PERFORM inventory.create_delivery_from_reserve(NEW.id);
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE TRIGGER trg_order_status_to_pending
+AFTER UPDATE OF status ON sales.orders
+FOR EACH ROW
+EXECUTE FUNCTION sales.trg_order_status_to_pending_fn();
+
+//////////////////////////////////////////////////////////////////////////////
+CREATE OR REPLACE FUNCTION inventory.trg_reserve_update_fn()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_order_status VARCHAR;
+    v_total_required INT;
+    v_total_reserved INT;
+    v_target_order_id INT;
+BEGIN
+    v_target_order_id := COALESCE(NEW.order_id, OLD.order_id);
+
+    SELECT status INTO v_order_status 
+    FROM sales.orders 
+    WHERE id = v_target_order_id;
+
+    IF v_order_status = 'pending' THEN
+        
+        SELECT COALESCE(SUM(quantity), 0) INTO v_total_required
+        FROM sales.order_items
+        WHERE order_id = v_target_order_id;
+
+        SELECT COALESCE(SUM(quantity), 0) INTO v_total_reserved
+        FROM inventory.order_reserves
+        WHERE order_id = v_target_order_id;
+
+        IF v_total_required > 0 AND v_total_required = v_total_reserved THEN
+            PERFORM inventory.create_delivery_from_reserve(v_target_order_id);
+        END IF;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE TRIGGER trg_reserve_update
+AFTER INSERT OR UPDATE OF quantity OR DELETE ON inventory.order_reserves
+FOR EACH ROW
+EXECUTE FUNCTION inventory.trg_reserve_update_fn();
+
