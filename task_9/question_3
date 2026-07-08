@@ -1,0 +1,53 @@
+Показать выручку за каждый месяц 2025 года. Показать выручку за январь 2026го и за первые 10 дней января 2026 года.
+
+SELECT 
+    date_trunc('month', o.created_at) AS month,
+    SUM(oi.quantity * oi.price) AS monthly_revenue
+FROM sales.orders o
+JOIN sales.order_items oi ON oi.order_id = o.id
+WHERE o.status = 'shipped'
+  AND o.created_at >= '2025-01-01 00:00:00' 
+  AND o.created_at < '2026-01-01 00:00:00'
+GROUP BY month
+ORDER BY month;
+
+2025-01-01 00:00:00.000	13837201026.21
+2025-02-01 00:00:00.000	12731916805.25
+2025-03-01 00:00:00.000	13967865701.92
+2025-04-01 00:00:00.000	13705172301.65
+2025-05-01 00:00:00.000	13843949506.44
+2025-06-01 00:00:00.000	13253858817.69
+2025-07-01 00:00:00.000	13756089004.04
+2025-08-01 00:00:00.000	14046247287.38
+2025-09-01 00:00:00.000	13818055145.37
+2025-10-01 00:00:00.000	14065440755.27
+2025-11-01 00:00:00.000	13431394980.49
+2025-12-01 00:00:00.000	13985414014.24
+Subquery Scan on ranked_products  (cost=45045.21..45074.83 rows=988 width=68) (actual time=379.262..384.678 rows=39.00 loops=1)
+Execution Time: 353.516 ms
+
+SELECT SUM(oi.quantity * oi.price) AS jan_2026_revenue
+FROM sales.orders o
+JOIN sales.order_items oi ON oi.order_id = o.id
+WHERE o.status = 'shipped'
+  AND o.created_at >= '2026-01-01 00:00:00' 
+  AND o.created_at < '2026-02-01 00:00:00';
+  
+Ответ -  14183694352.01
+Finalize Aggregate  (cost=33018.41..33018.42 rows=1 width=32) (actual time=79.428..84.355 rows=1.00 loops=1)
+  
+  SELECT SUM(oi.quantity * oi.price) AS jan_10_days_revenue
+FROM sales.orders o
+JOIN sales.order_items oi ON oi.order_id = o.id
+WHERE o.status = 'shipped'
+  AND o.created_at >= '2026-01-01 00:00:00' 
+  AND o.created_at < '2026-01-11 00:00:00';
+  
+Ответ - 4599077250.38
+Finalize Aggregate  (cost=32476.23..32476.24 rows=1 width=32) (actual time=27.761..31.117 rows=1.00 loops=1)
+
+создавала индекс 
+create INDEX idx_orders_created_at_brin ON sales.orders USING brin (created_at);
+не помог ни для какого запроса, видимо основная нагрузка на расчет идет
+  
+  

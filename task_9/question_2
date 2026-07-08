@@ -1,0 +1,23 @@
+Сколько всего было продано товаров 'Asus Смартфон 7X5B0'?
+
+EXPLAIN analyze
+SELECT SUM(oi.quantity) AS total_sold
+FROM sales.order_items oi
+JOIN sales.orders o ON oi.order_id = o.id
+JOIN catalog.products p ON oi.product_id = p.id
+WHERE p.name = 'Asus Смартфон 7X5B0' 
+  AND o.status = 'shipped';
+  
+Ответ 5871
+  
+Finalize Aggregate  (cost=24723.90..24723.91 rows=1 width=8) (actual time=65.800..71.350 rows=1.00 loops=1)
+Execution Time: 71.408 ms
+
+
+CREATE INDEX idx_products_name_hash ON catalog.products USING hash (name);
+CREATE INDEX idx_order_items_product_id ON sales.order_items(product_id);
+
+После индексации
+
+Aggregate  (cost=6366.23..6366.24 rows=1 width=8) (actual time=7.227..7.229 rows=1.00 loops=1)
+Execution Time: 7.271 ms

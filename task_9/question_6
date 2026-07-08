@@ -1,0 +1,82 @@
+Вывести топ-3 товара по выручке внутри каждой категории.
+
+
+WITH product_revenues AS (
+    SELECT 
+        p.category_id,
+        p.id AS product_id,
+        p.name AS product_name,
+        SUM(oi.quantity * oi.price) AS total_revenue
+    FROM sales.order_items oi
+    JOIN sales.orders o ON oi.order_id = o.id
+    JOIN catalog.products p ON oi.product_id = p.id
+    WHERE o.status = 'shipped' 
+    GROUP BY p.category_id, p.id, p.name
+),
+ranked_catalog AS (
+    SELECT 
+        category_id,
+        product_id,
+        product_name,
+        total_revenue,
+        DENSE_RANK() OVER (
+            PARTITION BY category_id 
+            ORDER BY total_revenue DESC
+        ) AS rank
+    FROM product_revenues
+)
+SELECT 
+    category_id,
+    product_id,
+    product_name,
+    total_revenue
+FROM ranked_catalog
+WHERE rank <= 3
+ORDER BY category_id, total_revenue DESC;
+
+1	16	Huawei Смартфон 7X5SL	888858725.15
+1	4	Bosch Смартфон WJO96	880648193.86
+1	18	Asus Смартфон 7X5B0	874072985.40
+2	146	Bosch Ноутбук AESO1	1830447573.32
+2	112	Huawei Ноутбук H4PTQ	1739700376.11
+2	142	Acer Ноутбук LHVCG	1666549186.97
+3	187	Lenovo Планшет PIFZO	741487780.85
+3	190	Asus Планшет T858G	716159420.61
+3	181	Nikon Планшет 9H2OF	716004456.02
+4	268	Logitech Телевизор PX3CJ	1515217540.83
+4	283	Dyson Телевизор EJNB2	1462221448.84
+4	272	Asus Телевизор ZHYRV	1432213401.39
+5	344	Keychron Наушники 2CGEM	300287590.63
+5	322	Philips Наушники 0CDVX	288539561.09
+5	359	Acer Наушники I5ZTJ	283084732.29
+6	447	Apple Консоль OI15K	506365999.62
+6	443	Dell Консоль 9OX18	476204539.04
+6	413	LG Консоль Q7X8I	457781803.93
+7	493	Huawei Клавиатура JRK35	88681698.95
+7	515	Acer Клавиатура 3Z568	88600209.78
+7	500	TP-Link Клавиатура H5B0D	88429986.24
+8	566	Bosch Роутер R84ZZ	184438457.09
+8	594	Bosch Роутер XZ5X1	174752818.39
+8	556	Logitech Роутер 5UYEH	168875645.86
+9	657	Bosch Умная колонка KCS26	156296082.30
+9	628	LG Умная колонка 229D8	151978679.62
+9	619	Logitech Умная колонка 1K53K	150121675.25
+10	727	Acer Камера LBKCX	1229355821.17
+10	742	HP Камера L9D3K	1116138397.60
+10	687	Dell Камера ULKYA	1102273571.90
+11	770	MSI Чехол IP7GV	29874731.62
+11	802	Logitech Чехол T1762	29699128.66
+11	806	Philips Чехол I2CB2	29466497.71
+12	899	Samsung Процессор RWB4T	476547865.76
+12	847	TP-Link Процессор CRSCR	471680011.24
+12	838	Samsung Процессор 9XYJW	470502486.84
+13	975	LG Пылесос RRTMX	371380551.31
+13	924	JBL Пылесос 6XC1M	355673130.47
+13	957	HP Пылесос XJSP0	350632742.10
+
+Subquery Scan on ranked_products  (cost=45045.21..45074.83 rows=988 width=68) (actual time=369.098..372.814 rows=39.00 loops=1)
+39 row(s) fetched - 1.167s, on 2026-07-07 at 13:06:56
+
+Хотела проиндексировать по категориям, но время не улучшилось, видимо потому что вся тяжесть запроса именно в том, чтоб посчитать выручку по каждому товару, чтоб определить топ 3
+
+
