@@ -270,12 +270,29 @@ def receive_transfer(transfer_id: str) -> None:
         if YesNoValidator.is_yes(ans):
             with conn.transaction():
                 with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT status FROM inventory.transfer_items 
+                        WHERE id = %s FOR UPDATE
+                    """, (sel_id,))
+
+                    fresh_row = cur.fetchone()
+                    if not fresh_row or fresh_row is None:
+                        render_error("Ошибка: позиция трансфера была удалена из системы!")
+                        continue
+
+                    fresh_status = str(fresh_row[0])
+                    if fresh_status == 'received':
+                        console.print(
+                            "[yellow]⚠ Внимание! Эта позиция уже была разгружена другим кладовщиком.[/yellow]")
+                        continue
+
+                    if fresh_status != 'shipped':
+                        render_error(f"Неверный статус позиции для разгрузки: '{fresh_status}'.")
+                        continue
                     if o_id:
                         cur.execute("""
                             INSERT INTO inventory.order_reserves (order_id, warehouse_id, product_id, quantity)
                             VALUES (%s, %s, %s, %s)
-                            ON CONFLICT (order_id, product_id) 
-                            DO UPDATE SET quantity = inventory.order_reserves.quantity + EXCLUDED.quantity
                         """, (o_id, user_wh_id, p_id, qty))
                         console.print(f"[green]✓ Товар зачислен в РЕЗЕРВ под целевой Заказ #{o_id}.[/green]")
                     else:
@@ -303,7 +320,11 @@ def ship_delivery(order_id: str) -> None:
 
     with conn.cursor() as cur:
         user_wh_id = _get_worker_wh(cur, user_id)
-        cur.execute("SELECT warehouse_id FROM inventory.worker_orders_view WHERE order_id = %s", (o_id,))
+        cur.execute("""
+            SELECT warehouse_id 
+            FROM inventory.worker_orders_view 
+            WHERE order_id = %s
+        """, (o_id,))
         o_row = cur.fetchone()
 
     if not o_row or o_row is None:
@@ -315,44 +336,68 @@ def ship_delivery(order_id: str) -> None:
         render_error("Этот заказ собран и должен отгружаться с другого склада!")
         return
 
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM inventory.deliveries WHERE order_id = %s", (o_id,))
+        d_row = cur.fetchone()
+        d_status = str(d_row) if d_row else None
+
+    if d_status == 'shipped':
+        console.print("[yellow]Этот заказ уже полностью отгружен и уехал с курьером.[/yellow]")
+        return
+
     while True:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT r.product_id, p.sku || ' - ' || p.name, r.quantity 
-                FROM inventory.order_reserves r
-                JOIN catalog.products p ON r.product_id = p.id
-                WHERE r.order_id = %s AND r.warehouse_id = %s
-                ORDER BY r.product_id
-            """, (o_id, user_wh_id))
-            reserves = cur.fetchall()
+                SELECT di.product_id, p.sku || ' - ' || p.name, di.quantity, di.status
+                FROM inventory.delivery_items di
+                JOIN catalog.products p ON di.product_id = p.id
+                WHERE di.order_id = %s
+                ORDER BY di.product_id
+            """, (o_id,))
+            items = cur.fetchall()
 
-        if not reserves:
-            console.print(
-                "[green]All reserved items for the order have been scanned and shipped to the courier.[/green]")
+        planned = [i for i in items if str(i) == 'planned']
+        if not planned:
+            console.print("[green]✓ Все позиции накладной доставки успешно отсканированы (shipped).[/green]")
             break
 
         options = []
-        for r in reserves:
-            p_id = int(r[0])
-            prod = str(r[1])
-            qty = int(r[2])
-            options.append((p_id, f"{prod} ({qty} шт.) [В РЕЗЕРВЕ / ОЖИДАЕТ ОТГРУЗКИ]"))
+        for i in items:
+            p_id = int(i)
+            prod = str(i)
+            qty = int(i)
+            st = str(i)
+            lbl = "✓ В МАШИНЕ" if st == 'shipped' else "ОЖИДАЕТ"
+            options.append((p_id, f"{prod} ({qty} шт.) [{lbl}]"))
         options.append((None, "--> Прервать отгрузку доставки <--"))
 
-        sel_p_id = choice("Сканируйте штрихкод товара для отправки покупателю:", options=options)
+        sel_p_id = choice("Сканируйте штрихкод товара для погрузки курьеру:", options=options)
         if sel_p_id is None:
             return
 
-        ans = prompt("Подтвердить отгрузку позиции со склада курьеру? (y/n): ", validator=YesNoValidator())
+        target = next(i for i in items if int(i) == sel_p_id)
+        if str(target) == 'shipped':
+            console.print("[yellow]Этот товар уже погружен в курьерскую машину.[/yellow]")
+            continue
+
+        ans = prompt("Подтвердить погрузку позиции курьеру? (y/n): ", validator=YesNoValidator())
         if YesNoValidator.is_yes(ans):
             with conn.transaction():
                 with conn.cursor() as cur:
-                    # Удаляем (списываем) позицию из резерва, так как товар покидает склад навсегда
                     cur.execute("""
-                        DELETE FROM inventory.order_reserves 
-                        WHERE order_id = %s AND warehouse_id = %s AND product_id = %s
-                    """, (o_id, user_wh_id, sel_p_id))
-            console.print("[green]✓ Позиция успешно переведена в статус 'shipped' и загружена в машину.[/green]")
+                        UPDATE inventory.delivery_items 
+                        SET status = 'shipped' 
+                        WHERE order_id = %s AND product_id = %s
+                    """, (o_id, sel_p_id))
+            console.print("[green]✓ Статус позиции успешно изменен на 'shipped'.[/green]")
+
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE inventory.deliveries 
+                SET status = 'shipped', shipped_at = NOW() 
+                WHERE order_id = %s
+            """, (o_id,))
 
     console.print(
-        f"[bold green]✓ Все позиции заказа #{o_id} успешно попозиционно отгружены кладовщиком со склада.[/bold green]")
+        f"[bold green]✓ Накладная доставки для Заказа #{o_id} успешно отгружена со склада и закрыта![/bold green]")

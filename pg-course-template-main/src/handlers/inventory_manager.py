@@ -61,7 +61,7 @@ def process_order(order_id: str) -> None:
             render_error(f"Заказ #{o_id} не найден или у него не указан склад назначения.")
             return
 
-        target_wh_id = int(o_row[0])  # Гарантированный чистый int
+        target_wh_id = int(o_row[0])
 
         cur.execute("SELECT product_id, quantity FROM sales.order_items WHERE order_id = %s", (o_id,))
         items = cur.fetchall()
@@ -132,8 +132,6 @@ def process_order(order_id: str) -> None:
                             cur.execute("""
                                 INSERT INTO inventory.order_reserves (order_id, warehouse_id, product_id, quantity)
                                 VALUES (%s, %s, %s, %s)
-                                ON CONFLICT (order_id, product_id) 
-                                DO UPDATE SET quantity = inventory.order_reserves.quantity + EXCLUDED.quantity
                             """, (o_id, target_wh_id, p_id, req_qty))
 
                     console.print("[green]✓ Товар успешно перенесен в резерв текущего склада.[/green]")
@@ -173,66 +171,8 @@ def process_order(order_id: str) -> None:
                 if not YesNoValidator.is_yes(ans):
                     continue
 
-                try:
-                    with conn.transaction():
-                        with conn.cursor() as cur:
-                            cur.execute(
-                                "SELECT quantity FROM inventory.stock WHERE warehouse_id = %s AND product_id = %s FOR UPDATE",
-                                (selected_src_wh, p_id)
-                            )
-                            rem_row = cur.fetchone()
-                            rem_stock = int(rem_row[0]) if rem_row and rem_row is not None else 0
-
-                            if rem_stock < req_qty:
-                                render_error("Ошибка гонки данных: товар на удаленном складе закончился!")
-                                return
-
-                            cur.execute("""
-                                SELECT id FROM inventory.transfers 
-                                WHERE src_warehouse_id = %s AND dst_warehouse_id = %s AND status = 'planned' 
-                                FOR SHARE
-                            """, (selected_src_wh, target_wh_id))
-                            t_row = cur.fetchone()
-                            t_id = int(t_row[0]) if t_row and t_row is not None else None
-
-                            if not t_id:
-                                cur.execute("""
-                                    INSERT INTO inventory.transfers (src_warehouse_id, dst_warehouse_id, status) 
-                                    VALUES (%s, %s, 'planned') RETURNING id
-                                """, (selected_src_wh, target_wh_id))
-                                fresh_t = cur.fetchone()
-                                t_id = int(fresh_t[0])
-
-                            cur.execute(
-                                "UPDATE inventory.stock SET quantity = quantity - %s WHERE warehouse_id = %s AND product_id = %s",
-                                (req_qty, selected_src_wh, p_id)
-                            )
-
-                            cur.execute("""
-                                SELECT id, quantity FROM inventory.transfer_items 
-                                WHERE transfer_id = %s AND product_id = %s AND order_id = %s
-                            """, (t_id, p_id, o_id))
-                            ti_row = cur.fetchone()
-
-                            if ti_row:
-                                ti_id = int(ti_row[0])
-                                cur.execute("""
-                                    UPDATE inventory.transfer_items 
-                                    SET quantity = quantity + %s 
-                                    WHERE id = %s
-                                """, (req_qty, ti_id))
-                            else:
-                                cur.execute("""
-                                    INSERT INTO inventory.transfer_items (transfer_id, product_id, quantity, status, created_by, order_id)
-                                    VALUES (%s, %s, %s, 'planned', %s, %s)
-                                """, (t_id, p_id, req_qty, user_id, o_id))
-
-
-                    console.print(f"[green]✓ Товар успешно добавлен в плановый межскладской Трансфер #{t_id}.[/green]")
-                    break
-                except Exception as e:
-                    render_error(f"Ошибка транзакции при создании трансфера: {e}")
-                    return
+                insert_tr_item_transaction(conn, user_id, selected_src_wh, p_id, req_qty,
+                               target_wh_id)
 
     console.print("\n[bold green]=== Попозиционная обработка заказа менеджером успешно завершена! ===[/bold green]")
 
@@ -648,6 +588,72 @@ def view_product_stock() -> None:
 
     console.print(table)
 
+def insert_tr_item_transaction(conn, user_id,  src_id, chosen_product_id, req_qty,
+                               dst_id) -> None:
+    try:
+        with conn.transaction():
+            with conn.cursor() as cur:
+
+                cur.execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;")
+
+                cur.execute("""
+                    SELECT quantity FROM inventory.stock 
+                    WHERE warehouse_id = %s AND product_id = %s FOR UPDATE
+                """, (src_id, chosen_product_id))
+                stock_row = cur.fetchone()
+
+                actual_stock = stock_row[0] if stock_row else 0
+                if actual_stock < req_qty:
+                    render_error(
+                        "[red]Ошибка транзакции: за время подтверждения свободный остаток товара изменился![/red]")
+                    return
+
+                cur.execute("""
+                    SELECT id FROM inventory.transfers 
+                    WHERE src_warehouse_id = %s AND dst_warehouse_id = %s AND status = 'planned'
+                    FOR SHARE
+                """, (src_id, dst_id))
+                t_row = cur.fetchone()
+                t_id = t_row[0] if t_row else None
+
+                if not t_id:
+                    cur.execute("""
+                        INSERT INTO inventory.transfers (src_warehouse_id, dst_warehouse_id, status)
+                        VALUES (%s, %s, 'planned') RETURNING id
+                    """, (src_id, dst_id))
+                    t_id = cur.fetchone()[0]
+
+                cur.execute("""
+                    SELECT id FROM inventory.transfer_items
+                    WHERE transfer_id = %s AND created_by = %s AND product_id = %s AND order_id IS NULL
+                """, (t_id, user_id, chosen_product_id))
+                existing_item = cur.fetchone()
+
+                cur.execute("""
+                    UPDATE inventory.stock SET quantity = quantity - %s 
+                    WHERE warehouse_id = %s AND product_id = %s
+                """, (req_qty, src_id, chosen_product_id))
+
+                if existing_item:
+                    ti_id = existing_item[0]
+                    cur.execute("""
+                        UPDATE inventory.transfer_items 
+                        SET quantity = quantity + %s 
+                        WHERE id = %s
+                    """, (req_qty, ti_id))
+                else:
+                    cur.execute("""
+                        INSERT INTO inventory.transfer_items (transfer_id, product_id, quantity, status, created_by, order_id)
+                        VALUES (%s, %s, %s, 'planned', %s, NULL)
+                    """, (t_id, chosen_product_id, req_qty, user_id))
+
+        console.print(f"[bold green]✓ Операция успешно завершена! {req_qty} шт. добавлены в ...[/bold green]")
+
+    except SerializationFailure:
+        render_error(
+            "[red]Ошибка гонки данных: параллельный менеджер изменил накладные на этом маршруте. Пожалуйста, повторите попытку.[/red]")
+    except Exception as e:
+        render_error(f"Критическая ошибка при записи в БД: {e}")
 
 @command("add transfer items", "интерактивное добавление товаров в перемещение (изоляция SERIALIZABLE)",
          CATEGORY_INVENTORY_MGMT, [ROLE_INVENTORY_MANAGER])
@@ -722,70 +728,9 @@ def add_transfer_items() -> None:
         console.print("[yellow]Операция полностью отменена. База данных не затрагивалась.[/yellow]")
         return
 
-    try:
-        with conn.transaction():
-            with conn.cursor() as cur:
+    insert_tr_item_transaction(conn, user_id, src_id, chosen_product_id, req_qty,
+                               dst_id)
 
-                cur.execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;")
-
-                cur.execute("""
-                    SELECT quantity FROM inventory.stock 
-                    WHERE warehouse_id = %s AND product_id = %s FOR UPDATE
-                """, (src_id, chosen_product_id))
-                stock_row = cur.fetchone()
-
-                actual_stock = stock_row[0] if stock_row else 0
-                if actual_stock < req_qty:
-                    render_error(
-                        "[red]Ошибка транзакции: за время подтверждения свободный остаток товара изменился![/red]")
-                    return
-
-                cur.execute("""
-                    SELECT id FROM inventory.transfers 
-                    WHERE src_warehouse_id = %s AND dst_warehouse_id = %s AND status = 'planned'
-                    FOR SHARE
-                """, (src_id, dst_id))
-                t_row = cur.fetchone()
-                t_id = t_row[0] if t_row else None
-
-                if not t_id:
-                    cur.execute("""
-                        INSERT INTO inventory.transfers (src_warehouse_id, dst_warehouse_id, status)
-                        VALUES (%s, %s, 'planned') RETURNING id
-                    """, (src_id, dst_id))
-                    t_id = cur.fetchone()[0]
-
-                cur.execute("""
-                    SELECT id FROM inventory.transfer_items
-                    WHERE transfer_id = %s AND created_by = %s AND product_id = %s AND order_id IS NULL
-                """, (t_id, user_id, chosen_product_id))
-                existing_item = cur.fetchone()
-
-                cur.execute("""
-                    UPDATE inventory.stock SET quantity = quantity - %s 
-                    WHERE warehouse_id = %s AND product_id = %s
-                """, (req_qty, src_id, chosen_product_id))
-
-                if existing_item:
-                    ti_id = existing_item[0]
-                    cur.execute("""
-                        UPDATE inventory.transfer_items 
-                        SET quantity = quantity + %s 
-                        WHERE id = %s
-                    """, (req_qty, ti_id))
-                else:
-                    cur.execute("""
-                        INSERT INTO inventory.transfer_items (transfer_id, product_id, quantity, status, created_by, order_id)
-                        VALUES (%s, %s, %s, 'planned', %s, NULL)
-                    """, (t_id, chosen_product_id, req_qty, user_id))
-
-        console.print(f"[bold green]✓ Операция успешно завершена! {req_qty} шт. добавлены в ...[/bold green]")
-
-    except SerializationFailure:
-        render_error(
-            "[red]Ошибка гонки данных: параллельный менеджер изменил накладные на этом маршруте. Пожалуйста, повторите попытку.[/red]")
-    except Exception as e:
-        render_error(f"Критическая ошибка при записи в БД: {e}")
 
 @command("remove transfer items", "интерактивное удаление товаров из перемещения (двухфазный паттерн без инпутов)",
          CATEGORY_INVENTORY_MGMT, [ROLE_INVENTORY_MANAGER])
